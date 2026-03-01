@@ -5,7 +5,8 @@ ENV ROOT_PASSWORD=123456 \
 
 RUN dnf update -y && \
     dnf install -y epel-release && \
-    dnf install -y \
+    dnf config-manager --set-enabled crb 2>/dev/null || true && \
+    dnf install -y --allowerasing \
         openssh-server \
         openssh-clients \
         sudo \
