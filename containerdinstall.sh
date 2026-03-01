@@ -2,7 +2,7 @@
 
 # Containerd 环境一键安装脚本
 # 用途: 在 Linux 系统上自动检测、安装和配置 Containerd 容器运行时
-# 作者: OneClickVirt Containerd
+
 # 日期: 2025-03-01
 
 # =============== 颜色输出函数 ===============
