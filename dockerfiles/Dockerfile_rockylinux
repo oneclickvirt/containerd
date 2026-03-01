@@ -4,6 +4,7 @@ ENV ROOT_PASSWORD=123456 \
     IPV6_ENABLED=false
 
 RUN dnf update -y && \
+    dnf install -y epel-release && \
     dnf install -y \
         openssh-server \
         openssh-clients \
