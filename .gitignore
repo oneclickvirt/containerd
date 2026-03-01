@@ -1,0 +1,15 @@
+*.tmp
+*.log
+*.pid
+/tmp/*
+test-report-*.md
+/test_results/*
+.vscode/
+.idea/
+*.swp
+*.swo
+.DS_Store
+Thumbs.db
+node_modules/
+__pycache__/
+*.pyc
