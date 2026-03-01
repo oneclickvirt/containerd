@@ -88,21 +88,32 @@ esac
 _blue "Detected system: $SYSTEM  arch: $ARCH_TYPE"
 
 # ======== CDN 检测 ========
-check_china() {
-    local ip_info
-    ip_info=$(curl -sLk --connect-timeout 5 --max-time 10 "https://ipapi.co/json/" 2>/dev/null || true)
-    if echo "$ip_info" | grep -q '"country": "CN"'; then
-        CN=true
+cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn1.spiritlhl.net/" "http://cdn2.spiritlhl.net/" "http://cdn3.spiritlhl.net/" "http://cdn4.spiritlhl.net/")
+cdn_success_url=""
+
+check_cdn() {
+    local o_url=$1
+    local shuffled_cdn_urls=($(shuf -e "${cdn_urls[@]}"))
+    for cdn_url in "${shuffled_cdn_urls[@]}"; do
+        if curl -4 -sL -k "${cdn_url}${o_url}" --max-time 6 | grep -q "success" >/dev/null 2>&1; then
+            export cdn_success_url="$cdn_url"
+            return
+        fi
+        sleep 0.5
+    done
+    export cdn_success_url=""
+}
+
+check_cdn_file() {
+    check_cdn "https://raw.githubusercontent.com/spiritLHLS/ecs/main/back/test"
+    if [ -n "$cdn_success_url" ]; then
+        _yellow "CDN available, using CDN: $cdn_success_url"
+    else
+        _yellow "No CDN available, using direct connection"
     fi
 }
-check_china
 
-if [[ "${CN}" == true ]]; then
-    _yellow "China mainland network detected, using domestic CDN"
-    cdn_success_url="https://cdn.spiritlhl.net/"
-else
-    cdn_success_url=""
-fi
+check_cdn_file
 
 # ======== 工具函数 ========
 update_sysctl() {

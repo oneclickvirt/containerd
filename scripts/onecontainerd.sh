@@ -87,16 +87,32 @@ if [[ -f /usr/local/bin/containerd_arch ]]; then
 fi
 
 # CDN
+cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn1.spiritlhl.net/" "http://cdn2.spiritlhl.net/" "http://cdn3.spiritlhl.net/" "http://cdn4.spiritlhl.net/")
 cdn_success_url=""
-if [[ -f /usr/local/bin/containerd_cdn ]]; then
-    cdn_success_url=$(cat /usr/local/bin/containerd_cdn)
-else
-    ip_info=$(curl -sLk --connect-timeout 5 --max-time 10 "https://ipapi.co/json/" 2>/dev/null || true)
-    if echo "$ip_info" | grep -q '"country": "CN"'; then
-        cdn_success_url="https://cdn.spiritlhl.net/"
-        echo "$cdn_success_url" > /usr/local/bin/containerd_cdn
+
+check_cdn() {
+    local o_url=$1
+    local shuffled_cdn_urls=($(shuf -e "${cdn_urls[@]}"))
+    for cdn_url in "${shuffled_cdn_urls[@]}"; do
+        if curl -4 -sL -k "${cdn_url}${o_url}" --max-time 6 | grep -q "success" >/dev/null 2>&1; then
+            export cdn_success_url="$cdn_url"
+            return
+        fi
+        sleep 0.5
+    done
+    export cdn_success_url=""
+}
+
+check_cdn_file() {
+    check_cdn "https://raw.githubusercontent.com/spiritLHLS/ecs/main/back/test"
+    if [ -n "$cdn_success_url" ]; then
+        _yellow "CDN available, using CDN: $cdn_success_url"
+    else
+        _yellow "No CDN available, using direct connection"
     fi
-fi
+}
+
+check_cdn_file
 
 # ======== 检查 nerdctl ========
 if ! command -v nerdctl >/dev/null 2>&1; then
@@ -145,41 +161,35 @@ download_and_load_image() {
         return 0
     fi
 
-    # 优先从本仓库 GitHub Releases 下载离线 tar 包
-    local download_url="${cdn_success_url}https://github.com/oneclickvirt/containerd/releases/download/${system_type}/${tar_filename}"
+    # 优先通过 CDN/GitHub Releases 下载离线 tar 包
+    local github_url="https://github.com/oneclickvirt/containerd/releases/download/${system_type}/${tar_filename}"
+    local download_url="${cdn_success_url}${github_url}"
     _yellow "Downloading image: $download_url"
 
-    if curl -L --connect-timeout 15 --max-time 600 -o "/tmp/${tar_filename}" "$download_url"; then
+    if curl -L --connect-timeout 15 --max-time 600 -o "/tmp/${tar_filename}" "$download_url" && \
+       [[ -f "/tmp/${tar_filename}" ]] && [[ -s "/tmp/${tar_filename}" ]]; then
         _yellow "Loading image from tar..."
         if nerdctl load < "/tmp/${tar_filename}"; then
             rm -f "/tmp/${tar_filename}"
-            # tar 包内镜像即为 spiritlhl/<sys>:latest，直接使用，无需 re-tag
             export image_name="${canonical_image}"
             _green "Image loaded: ${image_name}"
             return 0
         else
+            _yellow "Failed to load tar, removing..."
             rm -f "/tmp/${tar_filename}"
-            _yellow "Failed to load tar, falling back to registry pull..."
         fi
     else
-        _yellow "Failed to download tar, falling back to registry pull..."
+        _yellow "CDN/direct download failed for ${download_url}"
+        rm -f "/tmp/${tar_filename}" 2>/dev/null
     fi
 
-    # 回退：从 Docker Hub 拉取官方镜像，并打标签为 spiritlhl/<sys>:latest 保持一致
-    case "$system_type" in
-        ubuntu)       fallback_image="ubuntu:22.04" ;;
-        debian)       fallback_image="debian:12" ;;
-        alpine)       fallback_image="alpine:latest" ;;
-        almalinux)    fallback_image="almalinux:9" ;;
-        rockylinux)   fallback_image="rockylinux:9" ;;
-        openeuler)    fallback_image="openeuler/openeuler:22.03" ;;
-        *)            fallback_image="${system_type}:latest" ;;
-    esac
-    _yellow "Pulling fallback image: $fallback_image"
-    if nerdctl pull "$fallback_image"; then
-        nerdctl tag "$fallback_image" "${canonical_image}" 2>/dev/null || true
+    # 回退：从 ghcr.io 拉取镜像
+    local ghcr_image="ghcr.io/oneclickvirt/containerd:${system_type}-${arch}"
+    _yellow "Trying to pull from ghcr.io: $ghcr_image"
+    if nerdctl pull "$ghcr_image"; then
+        nerdctl tag "$ghcr_image" "${canonical_image}" 2>/dev/null || true
         export image_name="${canonical_image}"
-        _green "Fallback image ready: ${image_name}"
+        _green "Image pulled from ghcr.io: ${ghcr_image}"
         return 0
     fi
 
