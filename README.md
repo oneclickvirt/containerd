@@ -2,7 +2,7 @@
 
 [![Hits](https://hits.spiritlhl.net/containerd.svg)](https://hits.spiritlhl.net/containerd)
 
-基于 containerd + nerdctl 的容器环境一键安装与管理脚本，对应 [oneclickvirt/docker](https://github.com/oneclickvirt/docker) 的 containerd 版本实现。
+基于 containerd + nerdctl 的容器环境一键安装与管理脚本
 
 支持一键安装 containerd 运行时，并开设基于本仓库编译镜像的各种 Linux 容器（提供 SSH 访问），支持 IPv6、端口映射、资源限制等。
 
@@ -79,8 +79,6 @@ bash <(wget -qO- https://raw.githubusercontent.com/oneclickvirt/containerd/main/
 ```
 
 脚本会在执行前要求输入 `yes` 确认，操作不可逆。
-
-> **复测流程**：先执行卸载，再执行安装，即可从零验证整个安装流程。
 
 ## 镜像说明
 
