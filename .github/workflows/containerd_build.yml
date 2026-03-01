@@ -1,12 +1,6 @@
 name: Build and Push containerd Images
 
 on:
-  push:
-    branches:
-      - main
-    paths:
-      - 'dockerfiles/**'
-      - '.github/workflows/containerd_build.yml'
   workflow_dispatch:
 
 jobs:
