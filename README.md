@@ -58,14 +58,29 @@ chmod +x create_containerd.sh
 
 交互式脚本，自动递增容器名（ct1, ct2, ...）、SSH 端口、公网端口，容器信息记录到 `ctlog` 文件。
 
-## 查看容器
+## 查看与管理容器
 
 ```bash
-nerdctl ps -a            # 查看所有容器
-nerdctl exec -it <name> bash  # 进入容器
-nerdctl logs <name>      # 查看容器日志
-nerdctl rm -f <name>     # 删除容器
+nerdctl ps -a                  # 查看所有容器
+nerdctl exec -it <name> bash   # 进入容器（bash 系统）
+nerdctl exec -it <name> sh     # 进入容器（alpine）
+nerdctl logs <name>            # 查看容器日志
+nerdctl rm -f <name>           # 删除单个容器
+nerdctl images                 # 查看所有镜像
+nerdctl rmi <image>            # 删除镜像
 ```
+
+## 卸载（完整清理）
+
+一键卸载 containerd 全套环境，包括所有容器、镜像、CNI 网络、systemd 服务、二进制文件：
+
+```bash
+bash <(wget -qO- https://raw.githubusercontent.com/oneclickvirt/containerd/main/containerduninstall.sh)
+```
+
+脚本会在执行前要求输入 `yes` 确认，操作不可逆。
+
+> **复测流程**：先执行卸载，再执行安装，即可从零验证整个安装流程。
 
 ## 镜像说明
 

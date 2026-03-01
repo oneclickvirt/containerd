@@ -289,7 +289,7 @@ configure_cni() {
   "plugins": [
     {
       "type": "bridge",
-      "bridge": "nerdctl0",
+      "bridge": "ctn-br0",
       "isGateway": true,
       "ipMasq": true,
       "promiscMode": true,
@@ -297,8 +297,8 @@ configure_cni() {
         "type": "host-local",
         "ranges": [
           [{
-            "subnet": "10.4.0.0/24",
-            "gateway": "10.4.0.1"
+            "subnet": "172.20.0.0/16",
+            "gateway": "172.20.0.1"
           }]
         ],
         "routes": [
@@ -399,7 +399,7 @@ except Exception as e:
   "plugins": [
     {
       "type": "bridge",
-      "bridge": "nerdctl1",
+      "bridge": "ctn-br1",
       "isGateway": true,
       "ipMasq": false,
       "promiscMode": true,
@@ -407,8 +407,8 @@ except Exception as e:
         "type": "host-local",
         "ranges": [
           [{
-            "subnet": "10.5.0.0/24",
-            "gateway": "10.5.0.1"
+            "subnet": "172.21.0.0/16",
+            "gateway": "172.21.0.1"
           }],
           [{
             "subnet": "${prefix}"

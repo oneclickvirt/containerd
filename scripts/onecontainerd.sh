@@ -137,7 +137,14 @@ download_and_load_image() {
     local image_tag="${system_type}-${arch}"
     local tar_filename="spiritlhl_${system_type}_${arch}.tar.gz"
 
-    # 检查镜像是否已存在
+    # 检查镜像是否已存在（兼容 spiritlhl/<sys>:latest 和 spiritlhl:<sys>-<arch> 两种格式）
+    if nerdctl images 2>/dev/null | grep -q "spiritlhl/${system_type}"; then
+        # 确保标准化标签存在
+        nerdctl tag "spiritlhl/${system_type}:latest" "spiritlhl:${image_tag}" 2>/dev/null || true
+        _green "Image spiritlhl:${image_tag} already exists, skipping download"
+        export image_name="spiritlhl:${image_tag}"
+        return 0
+    fi
     if nerdctl images 2>/dev/null | grep -q "spiritlhl.*${image_tag}"; then
         _green "Image spiritlhl:${image_tag} already exists, skipping download"
         export image_name="spiritlhl:${image_tag}"
@@ -152,6 +159,8 @@ download_and_load_image() {
         _yellow "Loading image from tar..."
         if nerdctl load < "/tmp/${tar_filename}"; then
             rm -f "/tmp/${tar_filename}"
+            # tar 包内镜像标签为 spiritlhl/<sys>:latest，统一 re-tag 为 spiritlhl:<sys>-<arch>
+            nerdctl tag "spiritlhl/${system_type}:latest" "spiritlhl:${image_tag}" 2>/dev/null || true
             export image_name="spiritlhl:${image_tag}"
             _green "Image loaded: $image_name"
             return 0
