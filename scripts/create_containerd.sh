@@ -197,8 +197,19 @@ show_log() {
         _blue "======================================================"
         _blue "  已有容器记录 / Existing container log:"
         _blue "======================================================"
-        _blue "  格式: 名称  SSH端口  密码  CPU  内存(MB)  起始端口  结束端口  磁盘(GB)"
-        cat "$log_file"
+        while IFS= read -r line || [[ -n "$line" ]]; do
+            [[ -z "$line" ]] && continue
+            local n sshp pw cp mem sp ep dk
+            n=$(echo "$line"  | awk '{print $1}')
+            sshp=$(echo "$line" | awk '{print $2}')
+            pw=$(echo "$line"  | awk '{print $3}')
+            cp=$(echo "$line"  | awk '{print $4}')
+            mem=$(echo "$line" | awk '{print $5}')
+            sp=$(echo "$line"  | awk '{print $6}')
+            ep=$(echo "$line"  | awk '{print $7}')
+            dk=$(echo "$line"  | awk '{print $8}')
+            _blue "  名称:${n}  SSH端口:${sshp}  密码:${pw}  CPU:${cp}  内存:${mem}MB  端口:${sp}-${ep}  磁盘:${dk}GB"
+        done < "$log_file"
         echo
     fi
 }

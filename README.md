@@ -101,11 +101,6 @@ bash <(wget -qO- https://raw.githubusercontent.com/oneclickvirt/containerd/main/
 - **IPv6（独立地址）**：安装时自动检测公网 IPv6，创建 `containerd-ipv6` CNI 网络，并启动 NDP Responder 容器实现 IPv6 NDP 代理
 - **DNS 保活**：通过 `check-dns.service` 系统服务持续检测 DNS 可用性
 
-## 致谢
-
-- [containerd/nerdctl](https://github.com/containerd/nerdctl) - containerd 命令行工具
-- [oneclickvirt/docker](https://github.com/oneclickvirt/docker) - 本仓库参考的 Docker 版本实现
-
 ## Stargazers over time
 
 [![Stargazers over time](https://starchart.cc/oneclickvirt/containerd.svg)](https://starchart.cc/oneclickvirt/containerd)

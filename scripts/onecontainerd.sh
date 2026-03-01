@@ -289,24 +289,8 @@ main() {
 
     sleep 2
 
-    # 获取宿主机 IP
-    host_ip=$(curl -sL4m8 ip.sb 2>/dev/null || curl -sL4m8 ifconfig.me 2>/dev/null || ip route get 8.8.8.8 2>/dev/null | awk '{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
-
-    # 输出容器信息并保存到日志文件
-    {
-        echo "Container name:  $name"
-        echo "System:          $system"
-        echo "CPU:             $cpu core(s)"
-        echo "Memory:          ${memory} MB"
-        echo "Disk limit:      ${disk} GB (0=unlimited)"
-        echo "SSH:             ${host_ip}  port ${sshport}"
-        echo "Password:        $passwd"
-        echo "Port range:      ${startport}-${endport}"
-        echo "IPv6 standalone: ${independent_ipv6}"
-    } | tee "${name}"
-
-    _green "Container info saved to file: ${name}"
-    _blue "Connect: ssh root@${host_ip} -p ${sshport}  (password: ${passwd})"
+    echo "$name $sshport $passwd $cpu $memory $startport $endport $disk" >>"$name"
+    cat "$name"
 }
 
 main "$@"
