@@ -1,0 +1,45 @@
+FROM alpine:latest
+
+ENV ROOT_PASSWORD=123456 \
+    IPV6_ENABLED=false
+
+RUN apk update && \
+    apk add --no-cache \
+        openssh \
+        openssh-server \
+        openssh-keygen \
+        sudo \
+        curl \
+        wget \
+        ca-certificates \
+        net-tools \
+        iproute2 \
+        iptables \
+        iputils \
+        vim \
+        nano \
+        htop \
+        bash \
+        sshpass \
+        cronie \
+        python3 \
+        tzdata && \
+    rm -rf /var/cache/apk/*
+
+# SSH 基础配置
+RUN mkdir -p /var/run/sshd /etc/ssh && \
+    ssh-keygen -A && \
+    sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config || true
+
+# MOTD
+RUN echo 'Related repo https://github.com/oneclickvirt/containerd' >> /etc/motd && \
+    echo '--by https://t.me/spiritlhl' >> /etc/motd
+
+COPY entrypoint_alpine.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 22
+
+ENTRYPOINT ["/entrypoint.sh"]

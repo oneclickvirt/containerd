@@ -1,0 +1,52 @@
+FROM debian:12
+
+ENV DEBIAN_FRONTEND=noninteractive \
+    ROOT_PASSWORD=123456 \
+    IPV6_ENABLED=false
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        openssh-server \
+        openssh-client \
+        sudo \
+        curl \
+        wget \
+        ca-certificates \
+        net-tools \
+        iproute2 \
+        iptables \
+        iputils-ping \
+        vim \
+        nano \
+        htop \
+        cron \
+        dos2unix \
+        sshpass \
+        python3 \
+        locales \
+        tzdata && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/*
+
+# 生成 locale
+RUN sed -i '/en_US.UTF-8/s/^# //' /etc/locale.gen && \
+    sed -i '/zh_CN.UTF-8/s/^# //' /etc/locale.gen && \
+    locale-gen
+
+# SSH 基础配置
+RUN mkdir -p /var/run/sshd && \
+    ssh-keygen -A && \
+    sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config || true
+
+# MOTD
+RUN echo 'Related repo https://github.com/oneclickvirt/containerd' >> /etc/motd && \
+    echo '--by https://t.me/spiritlhl' >> /etc/motd
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 22
+
+ENTRYPOINT ["/entrypoint.sh"]

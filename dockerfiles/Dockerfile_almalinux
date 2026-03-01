@@ -1,0 +1,49 @@
+FROM almalinux:9
+
+ENV ROOT_PASSWORD=123456 \
+    IPV6_ENABLED=false
+
+RUN dnf update -y && \
+    dnf install -y \
+        openssh-server \
+        openssh-clients \
+        sudo \
+        curl \
+        wget \
+        ca-certificates \
+        net-tools \
+        iproute \
+        iptables \
+        iputils \
+        vim \
+        nano \
+        htop \
+        cronie \
+        python3 \
+        glibc-langpack-en \
+        glibc-langpack-zh \
+        tzdata && \
+    dnf clean all
+
+# 关闭 SELinux (容器内)
+RUN if [ -f /etc/selinux/config ]; then \
+        sed -i 's/SELINUX=enforcing/SELINUX=disabled/' /etc/selinux/config; \
+    fi
+
+# SSH 基础配置
+RUN mkdir -p /var/run/sshd && \
+    ssh-keygen -A && \
+    sed -i 's/#PermitRootLogin.*/PermitRootLogin yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PasswordAuthentication.*/PasswordAuthentication yes/' /etc/ssh/sshd_config && \
+    sed -i 's/#PubkeyAuthentication.*/PubkeyAuthentication yes/' /etc/ssh/sshd_config || true
+
+# MOTD
+RUN echo 'Related repo https://github.com/oneclickvirt/containerd' >> /etc/motd && \
+    echo '--by https://t.me/spiritlhl' >> /etc/motd
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+EXPOSE 22
+
+ENTRYPOINT ["/entrypoint.sh"]

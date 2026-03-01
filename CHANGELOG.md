@@ -1,0 +1,13 @@
+2026.03.01
+- 初始化仓库，对应 oneclickvirt/docker 实现 containerd 版本
+- 实现 containerdinstall.sh：一键安装 containerd + runc + nerdctl + CNI + buildkitd（nerdctl-full bundle）
+- 实现 scripts/onecontainerd.sh：单个容器开设脚本，支持 ubuntu/debian/alpine/almalinux/rockylinux/openeuler
+- 实现 scripts/create_containerd.sh：交互式批量容器开设脚本，记录至 ctlog 日志
+- 实现 scripts/ssh_bash.sh：容器内 SSH 初始化（bash 系统，Debian/Ubuntu/RHEL 系）
+- 实现 scripts/ssh_sh.sh：容器内 SSH 初始化（sh，Alpine 专用）
+- 实现 dockerfiles/ 各系统 Dockerfile + entrypoint 脚本，支持 amd64 和 arm64 双架构
+- 实现 .github/workflows/containerd_build.yml：自动构建镜像 tar 并发布到 GitHub Releases
+- 支持公网 IPv6 检测，自动创建 containerd-ipv6 CNI 网络，启动 NDP Responder 实现独立 IPv6
+- 支持国内 CDN 镜像加速（cdn.spiritlhl.net）
+- 支持 lxcfs 挂载（若宿主机安装了 lxcfs，提供容器内真实 /proc 视图）
+- 支持磁盘限制参数（需 xfs/btrfs snapshotter 支持 storage-opt）
