@@ -134,20 +134,14 @@ download_and_load_image() {
     local system_type="$1"
     local arch
     arch=$(get_arch)
-    local image_tag="${system_type}-${arch}"
     local tar_filename="spiritlhl_${system_type}_${arch}.tar.gz"
+    # 本仓库 tar 包加载后的标准镜像名（docker.io/spiritlhl/<sys>:latest）
+    local canonical_image="spiritlhl/${system_type}:latest"
 
-    # 检查镜像是否已存在（兼容 spiritlhl/<sys>:latest 和 spiritlhl:<sys>-<arch> 两种格式）
-    if nerdctl images 2>/dev/null | grep -q "spiritlhl/${system_type}"; then
-        # 确保标准化标签存在
-        nerdctl tag "spiritlhl/${system_type}:latest" "spiritlhl:${image_tag}" 2>/dev/null || true
-        _green "Image spiritlhl:${image_tag} already exists, skipping download"
-        export image_name="spiritlhl:${image_tag}"
-        return 0
-    fi
-    if nerdctl images 2>/dev/null | grep -q "spiritlhl.*${image_tag}"; then
-        _green "Image spiritlhl:${image_tag} already exists, skipping download"
-        export image_name="spiritlhl:${image_tag}"
+    # 检查镜像是否已存在
+    if nerdctl images 2>/dev/null | grep -qE "^spiritlhl/${system_type}\s"; then
+        _green "Image ${canonical_image} already exists, skipping download"
+        export image_name="${canonical_image}"
         return 0
     fi
 
@@ -159,10 +153,9 @@ download_and_load_image() {
         _yellow "Loading image from tar..."
         if nerdctl load < "/tmp/${tar_filename}"; then
             rm -f "/tmp/${tar_filename}"
-            # tar 包内镜像标签为 spiritlhl/<sys>:latest，统一 re-tag 为 spiritlhl:<sys>-<arch>
-            nerdctl tag "spiritlhl/${system_type}:latest" "spiritlhl:${image_tag}" 2>/dev/null || true
-            export image_name="spiritlhl:${image_tag}"
-            _green "Image loaded: $image_name"
+            # tar 包内镜像即为 spiritlhl/<sys>:latest，直接使用，无需 re-tag
+            export image_name="${canonical_image}"
+            _green "Image loaded: ${image_name}"
             return 0
         else
             rm -f "/tmp/${tar_filename}"
@@ -172,7 +165,7 @@ download_and_load_image() {
         _yellow "Failed to download tar, falling back to registry pull..."
     fi
 
-    # 回退：从 Docker Hub 拉取官方镜像
+    # 回退：从 Docker Hub 拉取官方镜像，并打标签为 spiritlhl/<sys>:latest 保持一致
     case "$system_type" in
         ubuntu)       fallback_image="ubuntu:22.04" ;;
         debian)       fallback_image="debian:12" ;;
@@ -184,9 +177,9 @@ download_and_load_image() {
     esac
     _yellow "Pulling fallback image: $fallback_image"
     if nerdctl pull "$fallback_image"; then
-        nerdctl tag "$fallback_image" "spiritlhl:${image_tag}" 2>/dev/null || true
-        export image_name="spiritlhl:${image_tag}"
-        _green "Fallback image ready: $image_name"
+        nerdctl tag "$fallback_image" "${canonical_image}" 2>/dev/null || true
+        export image_name="${canonical_image}"
+        _green "Fallback image ready: ${image_name}"
         return 0
     fi
 
@@ -242,38 +235,22 @@ main() {
         storage_opts="--storage-opt size=${disk}g"
     fi
 
-    # 运行容器
-    if [[ "$system" == "alpine" ]]; then
-        nerdctl run -d \
-            --cpus="${cpu}" \
-            --memory="${memory}m" \
-            --name "${name}" \
-            ${net_opts} \
-            -p "${sshport}:22" \
-            -p "${startport}-${endport}:${startport}-${endport}" \
-            --cap-add=MKNOD \
-            --restart always \
-            ${storage_opts} \
-            ${lxcfs_volumes} \
-            ${ipv6_env} \
-            -e ROOT_PASSWORD="${passwd}" \
-            "${image_name}"
-    else
-        nerdctl run -d \
-            --cpus="${cpu}" \
-            --memory="${memory}m" \
-            --name "${name}" \
-            ${net_opts} \
-            -p "${sshport}:22" \
-            -p "${startport}-${endport}:${startport}-${endport}" \
-            --cap-add=MKNOD \
-            --restart always \
-            ${storage_opts} \
-            ${lxcfs_volumes} \
-            ${ipv6_env} \
-            -e ROOT_PASSWORD="${passwd}" \
-            "${image_name}"
-    fi
+    # 运行容器（--pull=never 确保使用本地已加载的镜像，不尝试远程拉取）
+    nerdctl run -d \
+        --pull=never \
+        --cpus="${cpu}" \
+        --memory="${memory}m" \
+        --name "${name}" \
+        ${net_opts} \
+        -p "${sshport}:22" \
+        -p "${startport}-${endport}:${startport}-${endport}" \
+        --cap-add=MKNOD \
+        --restart always \
+        ${storage_opts} \
+        ${lxcfs_volumes} \
+        ${ipv6_env} \
+        -e ROOT_PASSWORD="${passwd}" \
+        "${image_name}"
 
     if [[ $? -ne 0 ]]; then
         _red "Failed to create container ${name}"
