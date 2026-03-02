@@ -114,6 +114,25 @@ check_cdn_file() {
 
 check_cdn_file
 
+# ======== 公网 IP 检测 ========
+IPV4=""
+check_ipv4() {
+    local API_NET=("ip.sb" "ipget.net" "ip.ping0.cc" "https://ip4.seeip.org" "https://api.my-ip.io/ip" "https://ipv4.icanhazip.com" "api.ipify.org")
+    for p in "${API_NET[@]}"; do
+        local response
+        response=$(curl -s4m8 "$p" 2>/dev/null | tr -d '[:space:]')
+        if [[ $? -eq 0 && -n "$response" ]] && ! echo "$response" | grep -q "error"; then
+            IPV4="$response"
+            return 0
+        fi
+        sleep 0.5
+    done
+    # fallback：从路由获取本机 IP
+    IPV4=$(ip route get 8.8.8.8 2>/dev/null | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}')
+}
+
+check_ipv4
+
 # ======== 检查 nerdctl ========
 if ! command -v nerdctl >/dev/null 2>&1; then
     _red "nerdctl not found. Please run containerdinstall.sh first."
@@ -270,6 +289,33 @@ main() {
     _green "Container ${name} created successfully"
     sleep 3
 
+    # ======== 补充 iptables NAT/FORWARD 规则（防止系统未自动添加） ========
+    if command -v iptables >/dev/null 2>&1; then
+        # IPv4 MASQUERADE
+        iptables -t nat -C POSTROUTING -s 172.20.0.0/16 ! -d 172.20.0.0/16 -j MASQUERADE 2>/dev/null || \
+            iptables -t nat -A POSTROUTING -s 172.20.0.0/16 ! -d 172.20.0.0/16 -j MASQUERADE 2>/dev/null || true
+        # IPv4 FORWARD
+        iptables -C FORWARD -s 172.20.0.0/16 -j ACCEPT 2>/dev/null || \
+            iptables -A FORWARD -s 172.20.0.0/16 -j ACCEPT 2>/dev/null || true
+        iptables -C FORWARD -d 172.20.0.0/16 -j ACCEPT 2>/dev/null || \
+            iptables -A FORWARD -d 172.20.0.0/16 -j ACCEPT 2>/dev/null || true
+    fi
+    # IPv6 FORWARD（仅当使用 IPv6 网络时）
+    if [[ "${independent_ipv6,,}" == "y" ]] && command -v ip6tables >/dev/null 2>&1; then
+        ip6tables -C FORWARD -i ctn-br1 -j ACCEPT 2>/dev/null || \
+            ip6tables -A FORWARD -i ctn-br1 -j ACCEPT 2>/dev/null || true
+        ip6tables -C FORWARD -o ctn-br1 -j ACCEPT 2>/dev/null || \
+            ip6tables -A FORWARD -o ctn-br1 -j ACCEPT 2>/dev/null || true
+        if [[ -f /usr/local/bin/containerd_ipv6_subnet ]]; then
+            local ipv6_subnet
+            ipv6_subnet=$(cat /usr/local/bin/containerd_ipv6_subnet)
+            ip6tables -C FORWARD -s "${ipv6_subnet}" -j ACCEPT 2>/dev/null || \
+                ip6tables -A FORWARD -s "${ipv6_subnet}" -j ACCEPT 2>/dev/null || true
+            ip6tables -C FORWARD -d "${ipv6_subnet}" -j ACCEPT 2>/dev/null || \
+                ip6tables -A FORWARD -d "${ipv6_subnet}" -j ACCEPT 2>/dev/null || true
+        fi
+    fi
+
     # 下载并执行 SSH 初始化脚本
     download_ssh_scripts "$name" "$system"
 
@@ -301,6 +347,25 @@ main() {
 
     echo "$name $sshport $passwd $cpu $memory $startport $endport $disk" >>"$name"
     cat "$name"
+
+    # ======== 显示连接信息 ========
+    echo
+    _green "======================================================"
+    _green "  Container Info:"
+    _green "  Name:    ${name}"
+    _green "  System:  ${system}"
+    _green "  CPU:     ${cpu}   Memory: ${memory}MB   Disk: ${disk}GB"
+    if [[ -n "$IPV4" ]]; then
+        _green "  SSH:     ssh root@${IPV4} -p ${sshport}"
+    else
+        _green "  SSH port: ${sshport}  (connect via host public IP)"
+    fi
+    _green "  Password: ${passwd}"
+    _green "  Ports:   ${startport}-${endport} → ${startport}-${endport} (NAT)"
+    if [[ "${independent_ipv6,,}" == "y" ]] && [[ "$IPV6_ENABLED" == "true" ]]; then
+        _green "  IPv6:    Independent public IPv6 address assigned"
+    fi
+    _green "======================================================"
 }
 
 main "$@"

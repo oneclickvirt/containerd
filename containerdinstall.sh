@@ -333,6 +333,49 @@ EOF
     _green "CNI network configured"
 }
 
+# ======== 设置 iptables NAT/FORWARD 规则（IPv4） ========
+setup_iptables_nat() {
+    _yellow "Setting up iptables NAT rules for containerd-net (172.20.0.0/16)..."
+    if ! command -v iptables >/dev/null 2>&1; then
+        _yellow "iptables not found, skipping"
+        return
+    fi
+    # MASQUERADE：容器出站流量伪装为宿主机 IP（基于子网，不依赖网桥接口是否存在）
+    iptables -t nat -C POSTROUTING -s 172.20.0.0/16 ! -d 172.20.0.0/16 -j MASQUERADE 2>/dev/null || \
+        iptables -t nat -A POSTROUTING -s 172.20.0.0/16 ! -d 172.20.0.0/16 -j MASQUERADE 2>/dev/null || true
+    # FORWARD：允许宿主机 <-> 容器子网的双向流量（包括端口映射后的入站转发）
+    iptables -C FORWARD -s 172.20.0.0/16 -j ACCEPT 2>/dev/null || \
+        iptables -A FORWARD -s 172.20.0.0/16 -j ACCEPT 2>/dev/null || true
+    iptables -C FORWARD -d 172.20.0.0/16 -j ACCEPT 2>/dev/null || \
+        iptables -A FORWARD -d 172.20.0.0/16 -j ACCEPT 2>/dev/null || true
+    _green "IPv4 iptables NAT/FORWARD rules configured"
+    # 持久化 iptables 规则
+    persist_iptables_rules
+}
+
+# ======== 持久化 iptables 规则 ========
+persist_iptables_rules() {
+    mkdir -p /etc/iptables 2>/dev/null || true
+    if command -v iptables-save >/dev/null 2>&1; then
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+    fi
+    if command -v ip6tables-save >/dev/null 2>&1; then
+        ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
+    fi
+    # 在 Debian/Ubuntu 上自动加载持久化规则
+    if [[ "$SYSTEM" == "Debian" || "$SYSTEM" == "Ubuntu" ]]; then
+        if ! command -v netfilter-persistent >/dev/null 2>&1; then
+            ${PACKAGE_INSTALL[int]} iptables-persistent 2>/dev/null || true
+        fi
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl enable netfilter-persistent 2>/dev/null || true
+        fi
+    elif [[ "$SYSTEM" == "CentOS" || "$SYSTEM" == "Fedora" ]]; then
+        service iptables save 2>/dev/null || \
+            iptables-save > /etc/sysconfig/iptables 2>/dev/null || true
+    fi
+}
+
 # ======== 配置内核参数 ========
 configure_kernel() {
     _yellow "Configuring kernel parameters..."
@@ -367,7 +410,7 @@ start_services() {
     fi
 }
 
-# ======== 配置 IPv6 内核参数 ========
+# ======== 配置 IPv6 内核参数及 ip6tables 规则 ========
 adapt_ipv6() {
     _yellow "Configuring IPv6 kernel parameters..."
     update_sysctl "net.ipv6.conf.all.forwarding=1"
@@ -377,6 +420,29 @@ adapt_ipv6() {
         update_sysctl "net.ipv6.conf.${interface}.proxy_ndp=1"
     fi
     sysctl --system >/dev/null 2>&1 || true
+
+    # ip6tables FORWARD 规则：允许 IPv6 容器子网双向流量
+    if command -v ip6tables >/dev/null 2>&1; then
+        local ipv6_subnet=""
+        if [[ -f /usr/local/bin/containerd_ipv6_subnet ]]; then
+            ipv6_subnet=$(cat /usr/local/bin/containerd_ipv6_subnet)
+        fi
+        if [[ -n "$ipv6_subnet" ]]; then
+            ip6tables -C FORWARD -s "${ipv6_subnet}" -j ACCEPT 2>/dev/null || \
+                ip6tables -A FORWARD -s "${ipv6_subnet}" -j ACCEPT 2>/dev/null || true
+            ip6tables -C FORWARD -d "${ipv6_subnet}" -j ACCEPT 2>/dev/null || \
+                ip6tables -A FORWARD -d "${ipv6_subnet}" -j ACCEPT 2>/dev/null || true
+            _green "ip6tables FORWARD rules configured for $ipv6_subnet"
+        fi
+        # 允许 ctn-br1 网桥接口双向转发
+        ip6tables -C FORWARD -i ctn-br1 -j ACCEPT 2>/dev/null || \
+            ip6tables -A FORWARD -i ctn-br1 -j ACCEPT 2>/dev/null || true
+        ip6tables -C FORWARD -o ctn-br1 -j ACCEPT 2>/dev/null || \
+            ip6tables -A FORWARD -o ctn-br1 -j ACCEPT 2>/dev/null || true
+        _green "IPv6 ip6tables rules configured"
+    fi
+    # 持久化
+    persist_iptables_rules 2>/dev/null || true
 }
 
 # ======== 创建 IPv6 CNI 网络 ========
@@ -559,13 +625,14 @@ main() {
     install_containerd_stack
     configure_containerd
     configure_cni
+    setup_iptables_nat
     configure_kernel
     start_services
     setup_dns_check
 
     if [[ "$IPV6_ENABLED" == true ]]; then
-        adapt_ipv6
         create_ipv6_network "$IPV6"
+        adapt_ipv6
         start_ndpresponder
         echo "true" > /usr/local/bin/containerd_ipv6_enabled
     else

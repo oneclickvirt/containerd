@@ -28,7 +28,7 @@ if [[ "$confirm" != "yes" ]]; then
 fi
 
 # ======== 1. 停止并删除所有容器 ========
-_blue "[1/8] 停止并删除所有容器..."
+_blue "[1/9] 停止并删除所有容器..."
 if command -v nerdctl >/dev/null 2>&1; then
     # 列出所有命名空间
     namespaces=$(nerdctl namespace ls -q 2>/dev/null || echo "default")
@@ -45,7 +45,7 @@ else
 fi
 
 # ======== 2. 删除所有镜像 ========
-_blue "[2/8] 删除所有容器镜像..."
+_blue "[2/9] 删除所有容器镜像..."
 if command -v nerdctl >/dev/null 2>&1; then
     for ns in $(nerdctl namespace ls -q 2>/dev/null || echo "default"); do
         images=$(nerdctl -n "$ns" images -q 2>/dev/null || true)
@@ -58,7 +58,7 @@ if command -v nerdctl >/dev/null 2>&1; then
 fi
 
 # ======== 3. 停止 systemd 服务 ========
-_blue "[3/8] 停止并禁用 systemd 服务..."
+_blue "[3/9] 停止并禁用 systemd 服务..."
 for svc in buildkitd containerd check-dns; do
     if systemctl is-active --quiet "$svc" 2>/dev/null; then
         systemctl stop "$svc" 2>/dev/null || true
@@ -81,7 +81,7 @@ systemctl daemon-reload 2>/dev/null || true
 _green "  服务已清理"
 
 # ======== 4. 清理 CNI 网络配置 ========
-_blue "[4/8] 清理 CNI 网络配置..."
+_blue "[4/9] 清理 CNI 网络配置..."
 rm -f /etc/cni/net.d/10-containerd-net.conflist
 rm -f /etc/cni/net.d/11-containerd-ipv6.conflist
 # 删除残留 CNI 网络接口
@@ -94,8 +94,40 @@ for br in ctn-br0 ctn-br1 nerdctl0 nerdctl1; do
 done
 _green "  CNI 网络已清理"
 
-# ======== 5. 删除 nerdctl-full 二进制及配置 ========
-_blue "[5/8] 删除 nerdctl/containerd 二进制文件..."
+# ======== 5. 清理 iptables/ip6tables 规则 ========
+_blue "[5/9] 清理 iptables NAT/FORWARD 规则..."
+if command -v iptables >/dev/null 2>&1; then
+    # 删除 IPv4 MASQUERADE 规则
+    iptables -t nat -D POSTROUTING -s 172.20.0.0/16 ! -d 172.20.0.0/16 -j MASQUERADE 2>/dev/null || true
+    # 删除 IPv4 FORWARD 规则
+    iptables -D FORWARD -s 172.20.0.0/16 -j ACCEPT 2>/dev/null || true
+    iptables -D FORWARD -d 172.20.0.0/16 -j ACCEPT 2>/dev/null || true
+    _yellow "  IPv4 iptables 规则已清理"
+fi
+if command -v ip6tables >/dev/null 2>&1; then
+    # 删除 IPv6 FORWARD 规则
+    ip6tables -D FORWARD -i ctn-br1 -j ACCEPT 2>/dev/null || true
+    ip6tables -D FORWARD -o ctn-br1 -j ACCEPT 2>/dev/null || true
+    if [[ -f /usr/local/bin/containerd_ipv6_subnet ]]; then
+        ipv6_subnet=$(cat /usr/local/bin/containerd_ipv6_subnet)
+        ip6tables -D FORWARD -s "${ipv6_subnet}" -j ACCEPT 2>/dev/null || true
+        ip6tables -D FORWARD -d "${ipv6_subnet}" -j ACCEPT 2>/dev/null || true
+    fi
+    _yellow "  IPv6 ip6tables 规则已清理"
+fi
+# 清理持久化规则文件
+if [[ -f /etc/iptables/rules.v4 ]]; then
+    rm -f /etc/iptables/rules.v4
+    _yellow "  删除 /etc/iptables/rules.v4"
+fi
+if [[ -f /etc/iptables/rules.v6 ]]; then
+    rm -f /etc/iptables/rules.v6
+    _yellow "  删除 /etc/iptables/rules.v6"
+fi
+_green "  iptables 规则已清理"
+
+# ======== 6. 删除 nerdctl-full 二进制及配置 ========
+_blue "[6/9] 删除 nerdctl/containerd 二进制文件..."
 # 主要二进制
 for bin in \
     /usr/local/bin/nerdctl \
@@ -126,8 +158,8 @@ if [[ -d /etc/buildkit ]]; then
 fi
 _green "  二进制及配置已清理"
 
-# ======== 6. 删除 containerd 数据目录 ========
-_blue "[6/8] 删除 containerd 运行数据..."
+# ======== 7. 删除 containerd 数据目录 ========
+_blue "[7/9] 删除 containerd 运行数据..."
 for dir in \
     /var/lib/containerd \
     /var/lib/buildkit \
@@ -141,8 +173,8 @@ for dir in \
 done
 _green "  数据目录已清理"
 
-# ======== 7. 删除本脚本安装的状态/辅助文件 ========
-_blue "[7/8] 删除辅助状态文件..."
+# ======== 8. 删除本脚本安装的状态/辅助文件 ========
+_blue "[8/9] 删除辅助状态文件..."
 for f in \
     /usr/local/bin/containerd_arch \
     /usr/local/bin/containerd_cdn \
@@ -157,8 +189,8 @@ rm -f /tmp/spiritlhl_*.tar.gz 2>/dev/null || true
 rm -f /tmp/ssh_bash.sh /tmp/ssh_sh.sh 2>/dev/null || true
 _green "  状态文件已清理"
 
-# ======== 8. 清理 sysctl 配置 ========
-_blue "[8/8] 清理 sysctl 配置..."
+# ======== 9. 清理 sysctl 配置 ========
+_blue "[9/9] 清理 sysctl 配置..."
 if [[ -f /etc/sysctl.d/99-containerd.conf ]]; then
     rm -f /etc/sysctl.d/99-containerd.conf
     sysctl --system >/dev/null 2>&1 || true
