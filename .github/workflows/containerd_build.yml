@@ -1,6 +1,8 @@
 name: Build and Push containerd Images
 
 on:
+  schedule:
+      - cron: "0 17 * * *"
   workflow_dispatch:
 
 jobs:
