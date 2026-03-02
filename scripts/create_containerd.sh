@@ -115,9 +115,20 @@ build_new_containers() {
     reading "每个容器 CPU 核数 (CPU cores per container, e.g. 1 or 0.5) [default: 1]: " cpu_nums
     [[ -z "$cpu_nums" ]] && cpu_nums=1
 
-    # 询问磁盘限制
-    reading "磁盘限制(GB) (Disk limit in GB, 0=unlimited) [default: 0]: " disk_size
-    [[ -z "$disk_size" || ! "$disk_size" =~ ^[0-9]+$ ]] && disk_size=0
+    # 检查存储驱动是否支持硬盘限制（仅 btrfs 支持）
+    disk_size=0
+    storage_driver="overlayfs"
+    if [ -f /usr/local/bin/containerd_storage_driver ]; then
+        storage_driver=$(cat /usr/local/bin/containerd_storage_driver)
+    fi
+    if [ "$storage_driver" = "btrfs" ]; then
+        reading "磁盘限制(GB) (Disk limit in GB, 0=unlimited) [default: 0]: " disk_size
+        [[ -z "$disk_size" || ! "$disk_size" =~ ^[0-9]+$ ]] && disk_size=0
+    else
+        _yellow "当前快照器（$storage_driver）不支持硬盘大小限制，磁盘参数设为0"
+        _yellow "Current snapshotter ($storage_driver) does not support disk size limitation, setting disk to 0"
+        disk_size=0
+    fi
 
     # 询问系统
     _blue "可选系统: ubuntu / debian / alpine / almalinux / rockylinux / openeuler"
@@ -143,9 +154,14 @@ build_new_containers() {
         [[ "${ipv6_choice,,}" == "y" ]] && independent_ipv6="y"
     fi
 
+    local disk_limit_info="无限制 (overlayfs)"
+    if [ "$storage_driver" = "btrfs" ] && [ "$disk_size" -gt 0 ] 2>/dev/null; then
+        disk_limit_info="${disk_size}GB (btrfs)"
+    fi
+
     _blue "======================================================"
     _blue "  即将创建 $new_nums 个容器"
-    _blue "  系统: $system_type  内存: ${memory_nums}MB  CPU: ${cpu_nums}  磁盘: ${disk_size}GB"
+    _blue "  系统: $system_type  内存: ${memory_nums}MB  CPU: ${cpu_nums}  磁盘: ${disk_limit_info}"
     _blue "  IPv6: $independent_ipv6"
     _blue "======================================================"
 

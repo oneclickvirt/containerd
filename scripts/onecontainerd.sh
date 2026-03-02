@@ -114,6 +114,29 @@ check_cdn_file() {
 
 check_cdn_file
 
+# ======== 检查 btrfs 存储驱动支持 ========
+check_storage_driver() {
+    btrfs_support="N"
+    storage_driver="overlayfs"
+    if [ -f /usr/local/bin/containerd_storage_driver ]; then
+        storage_driver=$(cat /usr/local/bin/containerd_storage_driver)
+    fi
+    if [ "$storage_driver" = "btrfs" ]; then
+        btrfs_support="Y"
+        _green "Detected btrfs snapshotter, disk size limitation is supported"
+        _green "检测到 btrfs 快照器，支持硬盘大小限制"
+    else
+        btrfs_support="N"
+        if [ "$disk" != "0" ]; then
+            _yellow "Current snapshotter ($storage_driver) does not support disk size limitation, ignoring disk parameter"
+            _yellow "当前快照器（$storage_driver）不支持硬盘大小限制，忽略硬盘参数"
+            disk="0"
+        fi
+    fi
+}
+
+check_storage_driver
+
 # ======== 公网 IP 检测 ========
 IPV4=""
 check_ipv4() {
@@ -256,12 +279,23 @@ main() {
         ipv6_env=""
     fi
 
-    # 存储限制选项 (nerdctl 支持 --device 来限制，但不支持 btrfs quota 方式)
-    # 若需要磁盘限制，需要 overlay2 + xfs quota 或 btrfs
+    # 存储限制选项
+    # nerdctl + containerd btrfs 快照器支持 --storage-opt size=Xg
     local storage_opts=""
-    # nerdctl 支持 --storage-opt size=Xg（需要xfs/btrfs snapshotter）
+    local snapshotter_opts=""
     if [[ "$disk" -gt 0 ]]; then
-        storage_opts="--storage-opt size=${disk}g"
+        if [ "$btrfs_support" = "Y" ]; then
+            snapshotter_opts="--snapshotter btrfs"
+            storage_opts="--storage-opt size=${disk}g"
+            _green "Disk size limitation enabled: ${disk}GB (btrfs snapshotter)"
+            _green "已启用硬盘大小限制：${disk}GB（使用 btrfs 快照器）"
+        else
+            _yellow "Disk size limitation requires btrfs snapshotter, but current snapshotter is: $storage_driver"
+            _yellow "硬盘大小限制需要 btrfs 快照器，当前快照器为: $storage_driver"
+            _yellow "Please reinstall with disk limitation support enabled (choose 'y' for disk limit in the installer)"
+            _yellow "请重新安装时选择启用硬盘限制支持（安装脚本中选择 'y'）"
+            disk="0"
+        fi
     fi
 
     # 运行容器（--pull=never 确保使用本地已加载的镜像，不尝试远程拉取）
@@ -275,6 +309,7 @@ main() {
         -p "${startport}-${endport}:${startport}-${endport}" \
         --cap-add=MKNOD \
         --restart always \
+        ${snapshotter_opts} \
         ${storage_opts} \
         ${lxcfs_volumes} \
         ${ipv6_env} \

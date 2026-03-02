@@ -171,6 +171,163 @@ detect_interface() {
     echo "$interface" > /usr/local/bin/containerd_main_interface
 }
 
+# ======== btrfs 存储驱动支持 ========
+check_storage_driver_support() {
+    local driver="$1"
+    case "$driver" in
+        "btrfs")
+            if command -v btrfs >/dev/null 2>&1; then
+                modprobe btrfs 2>/dev/null || true
+                return 0
+            fi
+            return 1
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
+
+install_storage_driver() {
+    local driver="$1"
+    local need_reboot=false
+    case "$driver" in
+        "btrfs")
+            if ! command -v btrfs >/dev/null 2>&1; then
+                _yellow "Installing btrfs-progs..."
+                case $SYSTEM in
+                    Debian|Ubuntu)
+                        ${PACKAGE_INSTALL[int]} btrfs-progs 2>/dev/null || true
+                        ;;
+                    CentOS|Fedora)
+                        ${PACKAGE_INSTALL[int]} btrfs-progs 2>/dev/null || true
+                        ;;
+                    Alpine)
+                        ${PACKAGE_INSTALL[int]} btrfs-progs 2>/dev/null || true
+                        ;;
+                    *)
+                        ${PACKAGE_INSTALL[int]} btrfs-progs 2>/dev/null || true
+                        ;;
+                esac
+                modprobe btrfs 2>/dev/null || true
+                if ! check_storage_driver_support "btrfs"; then
+                    _yellow "btrfs module could not be loaded, a reboot is required."
+                    _yellow "btrfs 模块无法加载，需要重启系统。"
+                    need_reboot=true
+                fi
+            fi
+            ;;
+    esac
+    if [ "$need_reboot" = true ]; then
+        echo "$driver" > /usr/local/bin/containerd_storage_reboot
+        _green "Storage driver $driver installed. System will reboot in 5 seconds to load kernel modules."
+        _green "存储驱动 $driver 已安装。系统将在5秒后重启以加载内核模块。"
+        _yellow "重启后请再次执行本脚本以继续安装。"
+        sleep 5
+        reboot
+        exit 0
+    fi
+}
+
+setup_containerd_btrfs_loop() {
+    local pool_size_gb="$1"
+    local loop_file="$2"
+    local mount_point="$3"
+    _yellow "Setting up containerd btrfs loop filesystem..."
+    local loop_dir
+    loop_dir=$(dirname "$loop_file")
+    if [ ! -d "$loop_dir" ]; then
+        mkdir -p "$loop_dir"
+    fi
+    # 若 containerd 正在运行，先停止
+    if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet containerd 2>/dev/null; then
+        systemctl stop containerd 2>/dev/null || true
+    elif command -v rc-service >/dev/null 2>&1 && rc-service containerd status >/dev/null 2>&1; then
+        rc-service containerd stop 2>/dev/null || true
+    fi
+    # 若 loop 文件已存在且已挂载，则跳过格式化以避免损坏已有数据
+    if [ -f "$loop_file" ] && losetup -j "$loop_file" 2>/dev/null | grep -q "$loop_file"; then
+        _green "Loop file $loop_file already exists and is attached, skipping creation."
+        local loop_device
+        loop_device=$(losetup -j "$loop_file" | cut -d: -f1)
+        mkdir -p "$mount_point"
+        mount "$loop_device" "$mount_point" 2>/dev/null || true
+        echo "$loop_device" > /usr/local/bin/containerd_loop_device
+        echo "$loop_file" > /usr/local/bin/containerd_loop_file
+        echo "$mount_point" > /usr/local/bin/containerd_mount_point
+        return
+    fi
+    if [ -d "$mount_point" ] && [ "$(ls -A "$mount_point" 2>/dev/null)" ]; then
+        _yellow "Backing up existing containerd data at $mount_point ..."
+        mv "$mount_point" "${mount_point}.backup.$(date +%Y%m%d-%H%M%S)"
+    fi
+    _yellow "Creating ${pool_size_gb}GB loop file at $loop_file ..."
+    fallocate -l "${pool_size_gb}G" "$loop_file"
+    local loop_device
+    loop_device=$(losetup --find --show "$loop_file")
+    _green "Loop device created: $loop_device"
+    _yellow "Creating btrfs filesystem on $loop_device ..."
+    mkfs.btrfs -f "$loop_device"
+    mkdir -p "$mount_point"
+    mount "$loop_device" "$mount_point"
+    if ! grep -q "$loop_file" /etc/fstab; then
+        echo "$loop_file $mount_point btrfs loop,defaults 0 0" >> /etc/fstab
+    fi
+    chmod 755 "$mount_point"
+    _green "containerd btrfs loop filesystem setup completed"
+    echo "$loop_device" > /usr/local/bin/containerd_loop_device
+    echo "$loop_file" > /usr/local/bin/containerd_loop_file
+    echo "$mount_point" > /usr/local/bin/containerd_mount_point
+}
+
+try_storage_drivers() {
+    local need_disk_limit="false"
+    if [ -f /usr/local/bin/containerd_need_disk_limit ]; then
+        need_disk_limit=$(cat /usr/local/bin/containerd_need_disk_limit)
+    fi
+    if [ "$need_disk_limit" != "true" ]; then
+        _yellow "Using overlayfs snapshotter (standard installation, no disk size limitation)."
+        _yellow "使用 overlayfs 快照器（标准安装，无硬盘大小限制）。"
+        echo "overlayfs" > /usr/local/bin/containerd_storage_driver
+        return 0
+    fi
+    # 处理重启后检测
+    if [ -f /usr/local/bin/containerd_storage_reboot ]; then
+        local reboot_driver
+        reboot_driver=$(cat /usr/local/bin/containerd_storage_reboot)
+        rm -f /usr/local/bin/containerd_storage_reboot
+        _green "System rebooted. Checking storage driver: $reboot_driver"
+        if check_storage_driver_support "$reboot_driver"; then
+            echo "$reboot_driver" > /usr/local/bin/containerd_storage_driver
+            return 0
+        else
+            _yellow "Storage driver $reboot_driver still not available after reboot. Falling back to overlayfs."
+            echo "overlayfs" > /usr/local/bin/containerd_storage_driver
+            return 0
+        fi
+    fi
+    if [ -f /usr/local/bin/containerd_storage_driver ]; then
+        _green "containerd storage driver already configured: $(cat /usr/local/bin/containerd_storage_driver)"
+        return 0
+    fi
+    if check_storage_driver_support "btrfs"; then
+        _green "btrfs is available, using btrfs snapshotter."
+        echo "btrfs" > /usr/local/bin/containerd_storage_driver
+        return 0
+    else
+        _yellow "Trying to install btrfs storage driver..."
+        install_storage_driver "btrfs"
+        if check_storage_driver_support "btrfs"; then
+            echo "btrfs" > /usr/local/bin/containerd_storage_driver
+            return 0
+        else
+            _yellow "btrfs installation failed. Falling back to overlayfs (no disk limit support)."
+            echo "overlayfs" > /usr/local/bin/containerd_storage_driver
+            return 0
+        fi
+    fi
+}
+
 # ======== 安装基础依赖 ========
 install_base_deps() {
     _yellow "Installing base dependencies..."
@@ -285,7 +442,57 @@ configure_containerd() {
         containerd config default > /etc/containerd/config.toml 2>/dev/null || true
         sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
     fi
-    _green "containerd configured"
+
+    # 若需要硬盘限制，配置 btrfs 快照器和自定义 data root
+    local need_disk_limit="false"
+    if [ -f /usr/local/bin/containerd_need_disk_limit ]; then
+        need_disk_limit=$(cat /usr/local/bin/containerd_need_disk_limit)
+    fi
+    local storage_driver="overlayfs"
+    if [ -f /usr/local/bin/containerd_storage_driver ]; then
+        storage_driver=$(cat /usr/local/bin/containerd_storage_driver)
+    fi
+    local containerd_install_path="/var/lib/containerd"
+    if [ -f /usr/local/bin/containerd_install_path ]; then
+        containerd_install_path=$(cat /usr/local/bin/containerd_install_path)
+    fi
+
+    if [ "$need_disk_limit" = "true" ] && [ "$storage_driver" = "btrfs" ]; then
+        _yellow "Configuring containerd with btrfs snapshotter for disk size limitation..."
+        # 设置 containerd root（data root）
+        if [ "$containerd_install_path" != "/var/lib/containerd" ]; then
+            if grep -q '^root = ' /etc/containerd/config.toml 2>/dev/null; then
+                sed -i "s|^root = .*|root = \"${containerd_install_path}\"|" /etc/containerd/config.toml
+            else
+                sed -i "1s|^|\nroot = \"${containerd_install_path}\"\n|" /etc/containerd/config.toml
+            fi
+        fi
+        # 将默认快照器从 overlayfs 切换为 btrfs
+        if grep -q 'snapshotter = "overlayfs"' /etc/containerd/config.toml 2>/dev/null; then
+            sed -i 's/snapshotter = "overlayfs"/snapshotter = "btrfs"/' /etc/containerd/config.toml
+        elif grep -q "snapshotter = " /etc/containerd/config.toml 2>/dev/null; then
+            sed -i 's|snapshotter = .*|snapshotter = "btrfs"|' /etc/containerd/config.toml
+        fi
+        # 为 nerdctl 写入默认快照器配置
+        mkdir -p /etc/nerdctl
+        if [ -f /etc/nerdctl/nerdctl.toml ]; then
+            if grep -q 'snapshotter' /etc/nerdctl/nerdctl.toml; then
+                sed -i 's|snapshotter.*|snapshotter = "btrfs"|' /etc/nerdctl/nerdctl.toml
+            else
+                echo 'snapshotter = "btrfs"' >> /etc/nerdctl/nerdctl.toml
+            fi
+        else
+            echo 'snapshotter = "btrfs"' > /etc/nerdctl/nerdctl.toml
+        fi
+        _green "containerd configured with btrfs snapshotter (disk size limitation enabled)"
+    else
+        # 确保 nerdctl 使用 overlayfs（默认）
+        mkdir -p /etc/nerdctl
+        if [ ! -f /etc/nerdctl/nerdctl.toml ]; then
+            echo 'snapshotter = "overlayfs"' > /etc/nerdctl/nerdctl.toml
+        fi
+        _green "containerd configured with overlayfs snapshotter (standard)"
+    fi
 }
 
 # ======== 配置 CNI 网络 ========
@@ -619,9 +826,72 @@ main() {
         fi
     done
 
+    # ======== 询问是否需要硬盘限制支持 ========
+    _green "Do you need containerd with container disk size limitation? (Support btrfs snapshotter)"
+    _green "是否需要支持容器硬盘大小限制的 containerd 环境？（使用 btrfs 快照器）"
+    _blue "If you choose 'y', you can limit the disk space for each container (requires btrfs)"
+    _blue "If you choose 'n', standard installation without disk limits"
+    _blue "如果选择 'y'，可以为每个容器限制磁盘空间（需要 btrfs 支持）"
+    _blue "如果选择 'n'，则为标准安装，无磁盘限制"
+    reading "Do you need container disk size limitation? ([n]/y): " need_disk_limit_input
+
+    _green "Where do you want to install containerd? (Enter to default: /var/lib/containerd):"
+    reading "containerd 安装路径？（回车则默认：/var/lib/containerd）：" containerd_install_path
+    if [ -z "$containerd_install_path" ]; then
+        containerd_install_path="/var/lib/containerd"
+    fi
+    echo "$containerd_install_path" > /usr/local/bin/containerd_install_path
+
+    containerd_pool_size=""
+    containerd_loop_file=""
+    if [ "$need_disk_limit_input" = "y" ] || [ "$need_disk_limit_input" = "Y" ]; then
+        echo "true" > /usr/local/bin/containerd_need_disk_limit
+        while true; do
+            _green "How large a containerd storage pool is needed? (unit: GB, e.g., enter 20 for 20G):"
+            reading "需要多大的 containerd 存储池？（单位GB，例如输入20表示20G）：" containerd_pool_size
+            if [[ "$containerd_pool_size" =~ ^[1-9][0-9]*$ ]]; then
+                break
+            else
+                _yellow "Invalid input, please enter a positive integer."
+                _yellow "输入无效，请输入一个正整数。"
+            fi
+        done
+        _green "Where do you want to store the containerd loop file? (Enter to default: /opt/containerd-pool.img):"
+        reading "containerd 循环文件存储位置？（回车则默认：/opt/containerd-pool.img）：" containerd_loop_file
+        if [ -z "$containerd_loop_file" ]; then
+            containerd_loop_file="/opt/containerd-pool.img"
+        fi
+    else
+        echo "false" > /usr/local/bin/containerd_need_disk_limit
+        containerd_pool_size=""
+        containerd_loop_file=""
+        _green "Will install standard containerd without container disk size limitation"
+        _green "将安装标准 containerd，无容器磁盘大小限制功能"
+    fi
+
     detect_interface
     check_ipv6
     install_base_deps
+
+    # 确定存储驱动（含重启后检测，btrfs 安装后需要重启）
+    try_storage_drivers
+
+    # 获取最终存储驱动
+    local final_driver="overlayfs"
+    if [ -f /usr/local/bin/containerd_storage_driver ]; then
+        final_driver=$(cat /usr/local/bin/containerd_storage_driver)
+    fi
+
+    # 若需要硬盘限制且 btrfs 可用，创建 btrfs loop 文件系统
+    local need_disk_limit="false"
+    if [ -f /usr/local/bin/containerd_need_disk_limit ]; then
+        need_disk_limit=$(cat /usr/local/bin/containerd_need_disk_limit)
+    fi
+    if [ "$need_disk_limit" = "true" ] && [ "$final_driver" = "btrfs" ] && \
+       [ -n "$containerd_pool_size" ] && [ -n "$containerd_loop_file" ]; then
+        setup_containerd_btrfs_loop "$containerd_pool_size" "$containerd_loop_file" "$containerd_install_path"
+    fi
+
     install_containerd_stack
     configure_containerd
     configure_cni
@@ -647,6 +917,11 @@ main() {
     echo
     _green "======================================================"
     _green "  ✓ Containerd 安装完成！"
+    if [ "$need_disk_limit" = "true" ] && [ "$final_driver" = "btrfs" ]; then
+        _green "  ✓ 硬盘大小限制：已启用（btrfs 快照器）"
+    else
+        _yellow "  ✗ 硬盘大小限制：未启用（overlayfs 快照器）"
+    fi
     _green "======================================================"
     echo
     _blue "常用命令:"
