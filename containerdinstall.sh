@@ -222,7 +222,7 @@ install_storage_driver() {
         echo "$driver" > /usr/local/bin/containerd_storage_reboot
         _green "Storage driver $driver installed. System will reboot in 5 seconds to load kernel modules."
         _green "存储驱动 $driver 已安装。系统将在5秒后重启以加载内核模块。"
-        _yellow "重启后请再次执行本脚本以继续安装。"
+        _yellow "重启后请再次执行本脚本以继续安装（仅 btrfs 磁盘限制场景需要此步骤）。"
         sleep 5
         reboot
         exit 0
@@ -376,6 +376,13 @@ install_containerd_stack() {
     rm -f "$tmp_tar"
     _green "nerdctl-full extracted to /usr/local"
 
+    # Make commands available immediately even when /usr/local/bin is absent from current PATH.
+    for bin_name in nerdctl containerd ctr runc buildctl buildkitd; do
+        if [[ -x "/usr/local/bin/${bin_name}" ]] && [[ ! -e "/usr/bin/${bin_name}" ]]; then
+            ln -s "/usr/local/bin/${bin_name}" "/usr/bin/${bin_name}" 2>/dev/null || true
+        fi
+    done
+
     # containerd systemd 服务文件
     if [[ ! -f /etc/systemd/system/containerd.service ]] && \
        [[ ! -f /usr/lib/systemd/system/containerd.service ]] && \
@@ -425,10 +432,16 @@ WantedBy=multi-user.target
 EOF
     fi
 
-    # 确保 /usr/local/bin 在 PATH 中
+    # 确保 /usr/local/bin 在 PATH 中（持久化且避免重复写入）
     if ! echo "$PATH" | grep -q "/usr/local/bin"; then
         export PATH="/usr/local/bin:$PATH"
-        echo 'export PATH="/usr/local/bin:$PATH"' >> /etc/profile
+    fi
+    if [[ ! -f /etc/profile.d/containerd-path.sh ]]; then
+        echo 'export PATH="/usr/local/bin:$PATH"' > /etc/profile.d/containerd-path.sh
+        chmod 644 /etc/profile.d/containerd-path.sh
+    fi
+    if [[ -f /etc/profile ]] && ! grep -q 'containerd-path.sh' /etc/profile; then
+        echo '[ -f /etc/profile.d/containerd-path.sh ] && . /etc/profile.d/containerd-path.sh' >> /etc/profile
     fi
 
     _green "containerd stack installed"

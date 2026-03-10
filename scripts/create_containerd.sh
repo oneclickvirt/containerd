@@ -12,6 +12,7 @@ _yellow() { echo -e "\033[33m\033[01m$*\033[0m"; }
 _blue()   { echo -e "\033[36m\033[01m$*\033[0m"; }
 reading() { read -rp "$(_green "$1")" "$2"; }
 export DEBIAN_FRONTEND=noninteractive
+export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 
 if [ "$(id -u)" != "0" ]; then
     _red "This script must be run as root" 1>&2
@@ -23,7 +24,7 @@ cd /root || exit 1
 
 # ======== 检查依赖 ========
 pre_check() {
-    if ! command -v nerdctl >/dev/null 2>&1; then
+    if ! command -v nerdctl >/dev/null 2>&1 && [[ ! -x /usr/local/bin/nerdctl ]]; then
         _yellow "nerdctl not found, running containerdinstall.sh..."
         if [[ -f /root/containerdinstall.sh ]]; then
             bash /root/containerdinstall.sh

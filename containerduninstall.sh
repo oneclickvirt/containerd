@@ -131,14 +131,20 @@ _blue "[6/9] 删除 nerdctl/containerd 二进制文件..."
 # 主要二进制
 for bin in \
     /usr/local/bin/nerdctl \
+    /usr/bin/nerdctl \
     /usr/local/bin/containerd \
+    /usr/bin/containerd \
     /usr/local/bin/containerd-shim \
     /usr/local/bin/containerd-shim-runc-v1 \
     /usr/local/bin/containerd-shim-runc-v2 \
     /usr/local/bin/ctr \
+    /usr/bin/ctr \
     /usr/local/bin/runc \
+    /usr/bin/runc \
     /usr/local/bin/buildctl \
+    /usr/bin/buildctl \
     /usr/local/bin/buildkitd \
+    /usr/bin/buildkitd \
     /usr/local/sbin/runc; do
     [[ -f "$bin" ]] && rm -f "$bin" && _yellow "  删除 $bin"
 done
@@ -181,7 +187,8 @@ for f in \
     /usr/local/bin/containerd_ipv6_enabled \
     /usr/local/bin/containerd_ipv6_subnet \
     /usr/local/bin/containerd_main_interface \
-    /usr/local/bin/check-dns.sh; do
+    /usr/local/bin/check-dns.sh \
+    /etc/profile.d/containerd-path.sh; do
     [[ -f "$f" ]] && rm -f "$f" && _yellow "  删除 $f"
 done
 # 删除 /tmp 残留

@@ -11,6 +11,7 @@ _green() { echo -e "\033[32m\033[01m$@\033[0m"; }
 _yellow() { echo -e "\033[33m\033[01m$@\033[0m"; }
 _blue() { echo -e "\033[36m\033[01m$@\033[0m"; }
 export DEBIAN_FRONTEND=noninteractive
+export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 
 if [ "$(id -u)" != "0" ]; then
     _red "This script must be run as root" 1>&2
@@ -157,7 +158,7 @@ check_ipv4() {
 check_ipv4
 
 # ======== 检查 nerdctl ========
-if ! command -v nerdctl >/dev/null 2>&1; then
+if ! command -v nerdctl >/dev/null 2>&1 && [[ ! -x /usr/local/bin/nerdctl ]]; then
     _red "nerdctl not found. Please run containerdinstall.sh first."
     exit 1
 fi
