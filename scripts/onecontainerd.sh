@@ -88,6 +88,12 @@ if [[ -f /usr/local/bin/containerd_arch ]]; then
 fi
 
 # CDN
+WITHOUTCDN_UPPER=$(echo "${WITHOUTCDN:-}" | tr '[:lower:]' '[:upper:]')
+WITHOUT_CDN="false"
+if [[ "$WITHOUTCDN_UPPER" == "TRUE" ]]; then
+    WITHOUT_CDN="true"
+fi
+
 cdn_urls=("https://cdn0.spiritlhl.top/" "http://cdn1.spiritlhl.net/" "http://cdn2.spiritlhl.net/" "http://cdn3.spiritlhl.net/" "http://cdn4.spiritlhl.net/")
 cdn_success_url=""
 
@@ -105,6 +111,11 @@ check_cdn() {
 }
 
 check_cdn_file() {
+    if [[ "$WITHOUT_CDN" == "true" ]]; then
+        export cdn_success_url=""
+        _yellow "WITHOUTCDN=TRUE detected, CDN acceleration disabled"
+        return
+    fi
     check_cdn "https://raw.githubusercontent.com/spiritLHLS/ecs/main/back/test"
     if [ -n "$cdn_success_url" ]; then
         _yellow "CDN available, using CDN: $cdn_success_url"
