@@ -76,8 +76,10 @@ install_required_modules() {
 
 # ======== 更新 motd ========
 update_motd() {
-    echo 'Related repo https://github.com/oneclickvirt/containerd' >> /etc/motd
-    echo '--by https://t.me/spiritlhl' >> /etc/motd
+    grep -qF 'Related repo https://github.com/oneclickvirt/containerd' /etc/motd 2>/dev/null || \
+        echo 'Related repo https://github.com/oneclickvirt/containerd' >> /etc/motd
+    grep -qF 'https://t.me/spiritlhl' /etc/motd 2>/dev/null || \
+        echo '--by https://t.me/spiritlhl' >> /etc/motd
 }
 
 # ======== 关闭 SELinux / iptables（RHEL 系）========
