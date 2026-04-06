@@ -2,6 +2,17 @@
 # from
 # https://github.com/oneclickvirt/containerd
 # 2026.03.01
+#
+# Supported environment variables (non-interactive mode / 支持的环境变量，可实现无交互安装):
+#   WITHOUTCDN=TRUE             - Disable CDN acceleration / 禁用 CDN 加速
+#   NEED_DISK_LIMIT=y           - Enable container disk size limitation (btrfs) / 启用容器磁盘大小限制 (btrfs)；默认: n
+#   CONTAINERD_INSTALL_PATH=    - containerd data root path / containerd 数据根路径；默认: /var/lib/containerd
+#   CONTAINERD_POOL_SIZE=20     - Storage pool size in GB / 存储池大小（GB），NEED_DISK_LIMIT=y 时必填
+#   CONTAINERD_LOOP_FILE=       - Loop file path / 循环文件路径；默认: /opt/containerd-pool.img
+#
+# Example / 示例:
+#   NEED_DISK_LIMIT=y CONTAINERD_POOL_SIZE=20 bash containerdinstall.sh
+#   CONTAINERD_INSTALL_PATH=/data/containerd bash containerdinstall.sh
 
 _red() { echo -e "\033[31m\033[01m$@\033[0m"; }
 _green() { echo -e "\033[32m\033[01m$@\033[0m"; }
@@ -850,19 +861,30 @@ main() {
         fi
     done
 
-    # ======== 询问是否需要硬盘限制支持 ========
-    _green "Do you need containerd with container disk size limitation? (Support btrfs snapshotter)"
-    _green "是否需要支持容器硬盘大小限制的 containerd 环境？（使用 btrfs 快照器）"
-    _blue "If you choose 'y', you can limit the disk space for each container (requires btrfs)"
-    _blue "If you choose 'n', standard installation without disk limits"
-    _blue "如果选择 'y'，可以为每个容器限制磁盘空间（需要 btrfs 支持）"
-    _blue "如果选择 'n'，则为标准安装，无磁盘限制"
-    reading "Do you need container disk size limitation? ([n]/y): " need_disk_limit_input
+    # ======== 询问是否需要硬盘限制支持（支持环境变量 NEED_DISK_LIMIT） ========
+    if [[ -n "${NEED_DISK_LIMIT:-}" ]]; then
+        need_disk_limit_input="${NEED_DISK_LIMIT}"
+        _blue "[non-interactive] NEED_DISK_LIMIT=${NEED_DISK_LIMIT}"
+    else
+        _green "Do you need containerd with container disk size limitation? (Support btrfs snapshotter)"
+        _green "是否需要支持容器硬盘大小限制的 containerd 环境？（使用 btrfs 快照器）"
+        _blue "If you choose 'y', you can limit the disk space for each container (requires btrfs)"
+        _blue "If you choose 'n', standard installation without disk limits"
+        _blue "如果选择 'y'，可以为每个容器限制磁盘空间（需要 btrfs 支持）"
+        _blue "如果选择 'n'，则为标准安装，无磁盘限制"
+        reading "Do you need container disk size limitation? ([n]/y): " need_disk_limit_input
+    fi
 
-    _green "Where do you want to install containerd? (Enter to default: /var/lib/containerd):"
-    reading "containerd 安装路径？（回车则默认：/var/lib/containerd）：" containerd_install_path
-    if [ -z "$containerd_install_path" ]; then
-        containerd_install_path="/var/lib/containerd"
+    # ======== 安装路径（支持环境变量 CONTAINERD_INSTALL_PATH） ========
+    if [[ -n "${CONTAINERD_INSTALL_PATH:-}" ]]; then
+        containerd_install_path="${CONTAINERD_INSTALL_PATH}"
+        _blue "[non-interactive] CONTAINERD_INSTALL_PATH=${CONTAINERD_INSTALL_PATH}"
+    else
+        _green "Where do you want to install containerd? (Enter to default: /var/lib/containerd):"
+        reading "containerd 安装路径？（回车则默认：/var/lib/containerd）：" containerd_install_path
+        if [ -z "$containerd_install_path" ]; then
+            containerd_install_path="/var/lib/containerd"
+        fi
     fi
     echo "$containerd_install_path" > /usr/local/bin/containerd_install_path
 
@@ -870,20 +892,37 @@ main() {
     containerd_loop_file=""
     if [ "$need_disk_limit_input" = "y" ] || [ "$need_disk_limit_input" = "Y" ]; then
         echo "true" > /usr/local/bin/containerd_need_disk_limit
-        while true; do
-            _green "How large a containerd storage pool is needed? (unit: GB, e.g., enter 20 for 20G):"
-            reading "需要多大的 containerd 存储池？（单位GB，例如输入20表示20G）：" containerd_pool_size
-            if [[ "$containerd_pool_size" =~ ^[1-9][0-9]*$ ]]; then
-                break
+        # 存储池大小（支持环境变量 CONTAINERD_POOL_SIZE）
+        if [[ -n "${CONTAINERD_POOL_SIZE:-}" ]]; then
+            if [[ "${CONTAINERD_POOL_SIZE}" =~ ^[1-9][0-9]*$ ]]; then
+                containerd_pool_size="${CONTAINERD_POOL_SIZE}"
+                _blue "[non-interactive] CONTAINERD_POOL_SIZE=${CONTAINERD_POOL_SIZE}"
             else
-                _yellow "Invalid input, please enter a positive integer."
-                _yellow "输入无效，请输入一个正整数。"
+                _red "Invalid CONTAINERD_POOL_SIZE='${CONTAINERD_POOL_SIZE}', must be a positive integer."
+                exit 1
             fi
-        done
-        _green "Where do you want to store the containerd loop file? (Enter to default: /opt/containerd-pool.img):"
-        reading "containerd 循环文件存储位置？（回车则默认：/opt/containerd-pool.img）：" containerd_loop_file
-        if [ -z "$containerd_loop_file" ]; then
-            containerd_loop_file="/opt/containerd-pool.img"
+        else
+            while true; do
+                _green "How large a containerd storage pool is needed? (unit: GB, e.g., enter 20 for 20G):"
+                reading "需要多大的 containerd 存储池？（单位GB，例如输入20表示20G）：" containerd_pool_size
+                if [[ "$containerd_pool_size" =~ ^[1-9][0-9]*$ ]]; then
+                    break
+                else
+                    _yellow "Invalid input, please enter a positive integer."
+                    _yellow "输入无效，请输入一个正整数。"
+                fi
+            done
+        fi
+        # 循环文件路径（支持环境变量 CONTAINERD_LOOP_FILE）
+        if [[ -n "${CONTAINERD_LOOP_FILE:-}" ]]; then
+            containerd_loop_file="${CONTAINERD_LOOP_FILE}"
+            _blue "[non-interactive] CONTAINERD_LOOP_FILE=${CONTAINERD_LOOP_FILE}"
+        else
+            _green "Where do you want to store the containerd loop file? (Enter to default: /opt/containerd-pool.img):"
+            reading "containerd 循环文件存储位置？（回车则默认：/opt/containerd-pool.img）：" containerd_loop_file
+            if [ -z "$containerd_loop_file" ]; then
+                containerd_loop_file="/opt/containerd-pool.img"
+            fi
         fi
     else
         echo "false" > /usr/local/bin/containerd_need_disk_limit

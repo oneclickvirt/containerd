@@ -3,6 +3,12 @@
 # https://github.com/oneclickvirt/containerd
 # 2026.03.01
 # 完整卸载 containerd 环境及所有容器
+#
+# Supported environment variables (non-interactive mode / 支持的环境变量，可实现无交互卸载):
+#   CONFIRM_UNINSTALL=yes       - Skip confirmation prompt / 跳过确认提示直接卸载
+#
+# Example / 示例:
+#   CONFIRM_UNINSTALL=yes bash containerduninstall.sh
 
 _red()    { echo -e "\033[31m\033[01m$@\033[0m"; }
 _green()  { echo -e "\033[32m\033[01m$@\033[0m"; }
@@ -21,7 +27,12 @@ echo "  包含：所有运行中/停止的容器、所有镜像、"
 echo "  CNI 网络、systemd 服务、nerdctl/containerd 二进制"
 echo "  操作不可逆！"
 echo "======================================================"
-read -rp "$(_yellow "确认卸载？输入 yes 继续，其他任意键退出: ")" confirm
+if [[ "${CONFIRM_UNINSTALL:-}" == "yes" ]]; then
+    confirm="yes"
+    _blue "[non-interactive] CONFIRM_UNINSTALL=yes, proceeding with uninstall..."
+else
+    read -rp "$(_yellow "确认卸载？输入 yes 继续，其他任意键退出: ")" confirm
+fi
 if [[ "$confirm" != "yes" ]]; then
     _green "已取消"
     exit 0
