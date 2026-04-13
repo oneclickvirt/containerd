@@ -170,7 +170,7 @@ check_ipv6() {
         for p in "${API_NET[@]}"; do
             local response
             response=$(curl -sLk6m8 "$p" 2>/dev/null | tr -d '[:space:]')
-            if [[ $? -eq 0 ]] && ! echo "$response" | grep -q "error"; then
+            if [[ $? -eq 0 ]] && echo "$response" | grep -qE '^[0-9a-fA-F:]+$' && echo "$response" | grep -q ':'; then
                 IPV6="$response"
                 break
             fi
@@ -380,25 +380,75 @@ install_containerd_stack() {
     _yellow "Installing containerd stack (nerdctl-full bundle)..."
 
     local nerdctl_ver
-    nerdctl_ver=$(curl -s "${cdn_success_url}https://api.github.com/repos/containerd/nerdctl/releases/latest" 2>/dev/null \
+    nerdctl_ver=$(curl -sL --connect-timeout 10 --max-time 15 \
+        "https://api.github.com/repos/containerd/nerdctl/releases/latest" 2>/dev/null \
         | grep tag_name | cut -d'"' -f4 | sed 's/v//')
     if [[ -z "$nerdctl_ver" ]]; then
         nerdctl_ver="2.0.4"
     fi
     _blue "nerdctl version: $nerdctl_ver"
 
-    local nerdctl_url="${cdn_success_url}https://github.com/containerd/nerdctl/releases/download/v${nerdctl_ver}/nerdctl-full-${nerdctl_ver}-linux-${ARCH_TYPE}.tar.gz"
+    local tarfile="nerdctl-full-${nerdctl_ver}-linux-${ARCH_TYPE}.tar.gz"
+    local direct_url="https://github.com/containerd/nerdctl/releases/download/v${nerdctl_ver}/${tarfile}"
+    local cdn_url="${cdn_success_url}${direct_url}"
     local tmp_tar
     tmp_tar=$(mktemp /tmp/nerdctl-full-XXXXXX.tar.gz)
 
     _yellow "Downloading nerdctl-full (this may take a while)..."
-    if ! curl -L --connect-timeout 30 --max-time 600 -o "$tmp_tar" "$nerdctl_url"; then
-        _red "Failed to download nerdctl-full"
+    local downloaded=false
+
+    # Try CDN first (only if cdn_success_url is set)
+    if [[ -n "$cdn_success_url" ]]; then
+        _yellow "Trying CDN: $cdn_url"
+        if curl -L --connect-timeout 30 --max-time 600 -o "$tmp_tar" "$cdn_url" 2>/dev/null; then
+            local fsize
+            fsize=$(stat -c%s "$tmp_tar" 2>/dev/null || stat -f%z "$tmp_tar" 2>/dev/null || echo 0)
+            if [[ "$fsize" -gt 10485760 ]]; then  # must be >10MB
+                if tar -tzf "$tmp_tar" >/dev/null 2>&1; then
+                    downloaded=true
+                    _green "CDN download successful (${fsize} bytes)"
+                else
+                    _yellow "CDN download corrupt (not valid gzip), trying direct..."
+                fi
+            else
+                _yellow "CDN download too small (${fsize} bytes), trying direct..."
+            fi
+        fi
+    fi
+
+    # Fall back to direct GitHub
+    if [[ "$downloaded" == "false" ]]; then
+        _yellow "Trying direct GitHub: $direct_url"
+        rm -f "$tmp_tar"
+        tmp_tar=$(mktemp /tmp/nerdctl-full-XXXXXX.tar.gz)
+        if curl -L --connect-timeout 30 --max-time 600 -o "$tmp_tar" "$direct_url" 2>/dev/null; then
+            local fsize
+            fsize=$(stat -c%s "$tmp_tar" 2>/dev/null || stat -f%z "$tmp_tar" 2>/dev/null || echo 0)
+            if [[ "$fsize" -gt 10485760 ]] && tar -tzf "$tmp_tar" >/dev/null 2>&1; then
+                downloaded=true
+                _green "Direct download successful (${fsize} bytes)"
+            fi
+        fi
+    fi
+
+    if [[ "$downloaded" == "false" ]]; then
+        _red "Failed to download nerdctl-full from CDN and direct GitHub"
         rm -f "$tmp_tar"
         exit 1
     fi
-    tar -C /usr/local -xzf "$tmp_tar"
+
+    if ! tar -C /usr/local -xzf "$tmp_tar"; then
+        _red "Failed to extract nerdctl-full"
+        rm -f "$tmp_tar"
+        exit 1
+    fi
     rm -f "$tmp_tar"
+
+    # Verify critical binaries were extracted
+    if [[ ! -x /usr/local/bin/containerd ]] || [[ ! -x /usr/local/bin/nerdctl ]]; then
+        _red "containerd or nerdctl binary missing after extraction"
+        exit 1
+    fi
     _green "nerdctl-full extracted to /usr/local"
 
     # Make commands available immediately even when /usr/local/bin is absent from current PATH.

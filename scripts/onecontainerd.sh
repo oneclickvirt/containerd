@@ -156,7 +156,7 @@ check_ipv4() {
     for p in "${API_NET[@]}"; do
         local response
         response=$(curl -s4m8 "$p" 2>/dev/null | tr -d '[:space:]')
-        if [[ $? -eq 0 && -n "$response" ]] && ! echo "$response" | grep -q "error"; then
+        if [[ $? -eq 0 && -n "$response" ]] && echo "$response" | grep -qE '^[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}\.[0-9]{1,3}$'; then
             IPV4="$response"
             return 0
         fi
