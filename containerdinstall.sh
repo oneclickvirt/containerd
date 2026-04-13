@@ -14,10 +14,10 @@
 #   NEED_DISK_LIMIT=y CONTAINERD_POOL_SIZE=20 bash containerdinstall.sh
 #   CONTAINERD_INSTALL_PATH=/data/containerd bash containerdinstall.sh
 
-_red() { echo -e "\033[31m\033[01m$@\033[0m"; }
-_green() { echo -e "\033[32m\033[01m$@\033[0m"; }
-_yellow() { echo -e "\033[33m\033[01m$@\033[0m"; }
-_blue() { echo -e "\033[36m\033[01m$@\033[0m"; }
+_red() { echo -e "\033[31m\033[01m$*\033[0m"; }
+_green() { echo -e "\033[32m\033[01m$*\033[0m"; }
+_yellow() { echo -e "\033[33m\033[01m$*\033[0m"; }
+_blue() { echo -e "\033[36m\033[01m$*\033[0m"; }
 reading() { read -rp "$(_green "$1")" "$2"; }
 export DEBIAN_FRONTEND=noninteractive
 utf8_locale=$(locale -a 2>/dev/null | grep -i -m 1 -E "UTF-8|utf8")
@@ -138,13 +138,16 @@ check_cdn_file() {
 check_cdn_file
 
 # ======== 工具函数 ========
+SYSCTL_CONF="/etc/sysctl.d/99-containerd.conf"
+
 update_sysctl() {
     local key="${1%%=*}"
     local val="${1##*=}"
-    if grep -q "^${key}" /etc/sysctl.conf 2>/dev/null; then
-        sed -i "s|^${key}.*|${key}=${val}|g" /etc/sysctl.conf
+    mkdir -p /etc/sysctl.d
+    if grep -q "^${key}" "$SYSCTL_CONF" 2>/dev/null; then
+        sed -i "s|^${key}.*|${key}=${val}|g" "$SYSCTL_CONF"
     else
-        echo "${key}=${val}" >> /etc/sysctl.conf
+        echo "${key}=${val}" >> "$SYSCTL_CONF"
     fi
     sysctl -w "${key}=${val}" >/dev/null 2>&1 || true
 }
@@ -163,7 +166,7 @@ check_ipv6() {
     IPV6=$(ip -6 addr show 2>/dev/null | grep global | awk '{print length, $2}' | sort -nr | head -n 1 | awk '{print $2}' | cut -d '/' -f1)
     if [[ -z "$IPV6" ]] || is_private_ipv6 "$IPV6"; then
         IPV6=""
-        local API_NET=("ipv6.ip.sb" "https://ipget.net" "ipv6.ping0.cc" "https://api.my-ip.io/ip" "https://ipv6.icanhazip.com")
+        local API_NET=("https://ipv6.ip.sb" "https://ipget.net" "https://ipv6.ping0.cc" "https://api.my-ip.io/ip" "https://ipv6.icanhazip.com")
         for p in "${API_NET[@]}"; do
             local response
             response=$(curl -sLk6m8 "$p" 2>/dev/null | tr -d '[:space:]')
@@ -356,16 +359,16 @@ install_base_deps() {
     case $SYSTEM in
         Debian|Ubuntu)
             eval "${PACKAGE_UPDATE[int]}" 2>/dev/null || true
-            ${PACKAGE_INSTALL[int]} curl wget ca-certificates iptables iproute2 \
+            ${PACKAGE_INSTALL[int]} curl wget ca-certificates nftables iptables iproute2 \
                 socat unzip tar jq 2>/dev/null || true
             ;;
         CentOS|Fedora)
-            ${PACKAGE_INSTALL[int]} curl wget ca-certificates iptables iproute \
+            ${PACKAGE_INSTALL[int]} curl wget ca-certificates nftables iptables iproute \
                 socat unzip tar jq 2>/dev/null || true
             ;;
         Alpine)
             ${PACKAGE_UPDATE[int]} 2>/dev/null || true
-            ${PACKAGE_INSTALL[int]} curl wget ca-certificates iptables iproute2 \
+            ${PACKAGE_INSTALL[int]} curl wget ca-certificates nftables iptables iproute2 \
                 socat unzip tar jq 2>/dev/null || true
             ;;
     esac
@@ -575,27 +578,97 @@ EOF
     _green "CNI network configured"
 }
 
-# ======== 设置 iptables NAT/FORWARD 规则（IPv4） ========
-setup_iptables_nat() {
-    _yellow "Setting up iptables NAT rules for containerd-net (172.20.0.0/16)..."
+# ======== 检测防火墙后端 ========
+detect_firewall_backend() {
+    if command -v nft >/dev/null 2>&1; then
+        FIREWALL_BACKEND="nftables"
+    elif command -v iptables >/dev/null 2>&1; then
+        FIREWALL_BACKEND="iptables"
+    else
+        FIREWALL_BACKEND="none"
+    fi
+    echo "$FIREWALL_BACKEND" > /usr/local/bin/containerd_firewall_backend
+    _blue "Firewall backend: $FIREWALL_BACKEND"
+}
+
+# ======== 设置防火墙规则（IPv4 NAT/FORWARD） ========
+setup_firewall_rules() {
+    _yellow "Setting up firewall rules for containerd-net (172.20.0.0/16)..."
+    if [[ "$FIREWALL_BACKEND" == "nftables" ]]; then
+        setup_nftables_ipv4
+    elif [[ "$FIREWALL_BACKEND" == "iptables" ]]; then
+        setup_iptables_ipv4
+    else
+        _yellow "No firewall backend available, skipping"
+        return
+    fi
+    persist_firewall_rules
+}
+
+setup_nftables_ipv4() {
+    nft delete table ip containerd 2>/dev/null || true
+    nft add table ip containerd
+    nft add chain ip containerd postrouting '{ type nat hook postrouting priority srcnat; policy accept; }'
+    nft add rule ip containerd postrouting ip saddr 172.20.0.0/16 ip daddr != 172.20.0.0/16 masquerade
+    nft add chain ip containerd forward '{ type filter hook forward priority filter; policy accept; }'
+    nft add rule ip containerd forward ip saddr 172.20.0.0/16 accept
+    nft add rule ip containerd forward ip daddr 172.20.0.0/16 accept
+    _green "nftables IPv4 NAT/FORWARD rules configured"
+}
+
+setup_iptables_ipv4() {
     if ! command -v iptables >/dev/null 2>&1; then
         _yellow "iptables not found, skipping"
         return
     fi
-    # MASQUERADE：容器出站流量伪装为宿主机 IP（基于子网，不依赖网桥接口是否存在）
     iptables -t nat -C POSTROUTING -s 172.20.0.0/16 ! -d 172.20.0.0/16 -j MASQUERADE 2>/dev/null || \
         iptables -t nat -A POSTROUTING -s 172.20.0.0/16 ! -d 172.20.0.0/16 -j MASQUERADE 2>/dev/null || true
-    # FORWARD：允许宿主机 <-> 容器子网的双向流量（包括端口映射后的入站转发）
     iptables -C FORWARD -s 172.20.0.0/16 -j ACCEPT 2>/dev/null || \
         iptables -A FORWARD -s 172.20.0.0/16 -j ACCEPT 2>/dev/null || true
     iptables -C FORWARD -d 172.20.0.0/16 -j ACCEPT 2>/dev/null || \
         iptables -A FORWARD -d 172.20.0.0/16 -j ACCEPT 2>/dev/null || true
-    _green "IPv4 iptables NAT/FORWARD rules configured"
-    # 持久化 iptables 规则
-    persist_iptables_rules
+    _green "iptables IPv4 NAT/FORWARD rules configured"
 }
 
-# ======== 持久化 iptables 规则 ========
+# ======== 持久化防火墙规则 ========
+persist_firewall_rules() {
+    if [[ "$FIREWALL_BACKEND" == "nftables" ]]; then
+        persist_nftables_rules
+    elif [[ "$FIREWALL_BACKEND" == "iptables" ]]; then
+        persist_iptables_rules
+    fi
+}
+
+persist_nftables_rules() {
+    mkdir -p /etc/nftables.d
+    local nft_file="/etc/nftables.d/containerd.nft"
+    {
+        echo '#!/usr/sbin/nft -f'
+        if nft list table ip containerd >/dev/null 2>&1; then
+            nft list table ip containerd
+        fi
+        if nft list table ip6 containerd >/dev/null 2>&1; then
+            nft list table ip6 containerd
+        fi
+    } > "$nft_file"
+    chmod 644 "$nft_file"
+    if [[ -f /etc/nftables.conf ]]; then
+        if ! grep -q 'include "/etc/nftables.d/' /etc/nftables.conf 2>/dev/null; then
+            echo 'include "/etc/nftables.d/*.nft"' >> /etc/nftables.conf
+        fi
+    else
+        cat > /etc/nftables.conf <<'NFTEOF'
+#!/usr/sbin/nft -f
+flush ruleset
+include "/etc/nftables.d/*.nft"
+NFTEOF
+    fi
+    if command -v systemctl >/dev/null 2>&1; then
+        systemctl enable nftables 2>/dev/null || true
+    fi
+    _green "nftables rules persisted"
+}
+
 persist_iptables_rules() {
     mkdir -p /etc/iptables 2>/dev/null || true
     if command -v iptables-save >/dev/null 2>&1; then
@@ -604,7 +677,6 @@ persist_iptables_rules() {
     if command -v ip6tables-save >/dev/null 2>&1; then
         ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
     fi
-    # 在 Debian/Ubuntu 上自动加载持久化规则
     if [[ "$SYSTEM" == "Debian" || "$SYSTEM" == "Ubuntu" ]]; then
         if ! command -v netfilter-persistent >/dev/null 2>&1; then
             ${PACKAGE_INSTALL[int]} iptables-persistent 2>/dev/null || true
@@ -652,7 +724,7 @@ start_services() {
     fi
 }
 
-# ======== 配置 IPv6 内核参数及 ip6tables 规则 ========
+# ======== 配置 IPv6 内核参数及防火墙规则 ========
 adapt_ipv6() {
     _yellow "Configuring IPv6 kernel parameters..."
     update_sysctl "net.ipv6.conf.all.forwarding=1"
@@ -663,28 +735,36 @@ adapt_ipv6() {
     fi
     sysctl --system >/dev/null 2>&1 || true
 
-    # ip6tables FORWARD 规则：允许 IPv6 容器子网双向流量
-    if command -v ip6tables >/dev/null 2>&1; then
-        local ipv6_subnet=""
-        if [[ -f /usr/local/bin/containerd_ipv6_subnet ]]; then
-            ipv6_subnet=$(cat /usr/local/bin/containerd_ipv6_subnet)
+    local ipv6_subnet=""
+    if [[ -f /usr/local/bin/containerd_ipv6_subnet ]]; then
+        ipv6_subnet=$(cat /usr/local/bin/containerd_ipv6_subnet)
+    fi
+
+    if [[ "$FIREWALL_BACKEND" == "nftables" ]]; then
+        nft delete table ip6 containerd 2>/dev/null || true
+        nft add table ip6 containerd
+        nft add chain ip6 containerd forward '{ type filter hook forward priority filter; policy accept; }'
+        nft add rule ip6 containerd forward iifname "ctn-br1" accept
+        nft add rule ip6 containerd forward oifname "ctn-br1" accept
+        if [[ -n "$ipv6_subnet" ]]; then
+            nft add rule ip6 containerd forward ip6 saddr "$ipv6_subnet" accept
+            nft add rule ip6 containerd forward ip6 daddr "$ipv6_subnet" accept
         fi
+        _green "nftables IPv6 FORWARD rules configured"
+    elif [[ "$FIREWALL_BACKEND" == "iptables" ]] && command -v ip6tables >/dev/null 2>&1; then
         if [[ -n "$ipv6_subnet" ]]; then
             ip6tables -C FORWARD -s "${ipv6_subnet}" -j ACCEPT 2>/dev/null || \
                 ip6tables -A FORWARD -s "${ipv6_subnet}" -j ACCEPT 2>/dev/null || true
             ip6tables -C FORWARD -d "${ipv6_subnet}" -j ACCEPT 2>/dev/null || \
                 ip6tables -A FORWARD -d "${ipv6_subnet}" -j ACCEPT 2>/dev/null || true
-            _green "ip6tables FORWARD rules configured for $ipv6_subnet"
         fi
-        # 允许 ctn-br1 网桥接口双向转发
         ip6tables -C FORWARD -i ctn-br1 -j ACCEPT 2>/dev/null || \
             ip6tables -A FORWARD -i ctn-br1 -j ACCEPT 2>/dev/null || true
         ip6tables -C FORWARD -o ctn-br1 -j ACCEPT 2>/dev/null || \
             ip6tables -A FORWARD -o ctn-br1 -j ACCEPT 2>/dev/null || true
-        _green "IPv6 ip6tables rules configured"
+        _green "iptables IPv6 FORWARD rules configured"
     fi
-    # 持久化
-    persist_iptables_rules 2>/dev/null || true
+    persist_firewall_rules 2>/dev/null || true
 }
 
 # ======== 创建 IPv6 CNI 网络 ========
@@ -958,7 +1038,8 @@ main() {
     install_containerd_stack
     configure_containerd
     configure_cni
-    setup_iptables_nat
+    detect_firewall_backend
+    setup_firewall_rules
     configure_kernel
     start_services
     setup_dns_check

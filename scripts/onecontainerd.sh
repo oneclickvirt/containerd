@@ -6,10 +6,10 @@
 # Usage:
 # ./onecontainerd.sh <name> <cpu> <memory_mb> <password> <sshport> <startport> <endport> [independent_ipv6:y/n] [system] [disk_gb]
 
-_red() { echo -e "\033[31m\033[01m$@\033[0m"; }
-_green() { echo -e "\033[32m\033[01m$@\033[0m"; }
-_yellow() { echo -e "\033[33m\033[01m$@\033[0m"; }
-_blue() { echo -e "\033[36m\033[01m$@\033[0m"; }
+_red() { echo -e "\033[31m\033[01m$*\033[0m"; }
+_green() { echo -e "\033[32m\033[01m$*\033[0m"; }
+_yellow() { echo -e "\033[33m\033[01m$*\033[0m"; }
+_blue() { echo -e "\033[36m\033[01m$*\033[0m"; }
 export DEBIAN_FRONTEND=noninteractive
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 
@@ -152,7 +152,7 @@ check_storage_driver
 # ======== 公网 IP 检测 ========
 IPV4=""
 check_ipv4() {
-    local API_NET=("ip.sb" "ipget.net" "ip.ping0.cc" "https://ip4.seeip.org" "https://api.my-ip.io/ip" "https://ipv4.icanhazip.com" "api.ipify.org")
+    local API_NET=("https://ip.sb" "https://ipget.net" "https://ip.ping0.cc" "https://ip4.seeip.org" "https://api.my-ip.io/ip" "https://ipv4.icanhazip.com" "https://api.ipify.org")
     for p in "${API_NET[@]}"; do
         local response
         response=$(curl -s4m8 "$p" 2>/dev/null | tr -d '[:space:]')
@@ -336,30 +336,61 @@ main() {
     _green "Container ${name} created successfully"
     sleep 3
 
-    # ======== 补充 iptables NAT/FORWARD 规则（防止系统未自动添加） ========
-    if command -v iptables >/dev/null 2>&1; then
-        # IPv4 MASQUERADE
+    # ======== 补充防火墙 NAT/FORWARD 规则（防止系统未自动添加） ========
+    local fw_backend="iptables"
+    if [[ -f /usr/local/bin/containerd_firewall_backend ]]; then
+        fw_backend=$(cat /usr/local/bin/containerd_firewall_backend)
+    fi
+
+    if [[ "$fw_backend" == "nftables" ]] && command -v nft >/dev/null 2>&1; then
+        # 确保 nftables IPv4 表存在
+        if ! nft list table ip containerd >/dev/null 2>&1; then
+            nft add table ip containerd
+            nft add chain ip containerd postrouting '{ type nat hook postrouting priority srcnat; policy accept; }'
+            nft add rule ip containerd postrouting ip saddr 172.20.0.0/16 ip daddr != 172.20.0.0/16 masquerade
+            nft add chain ip containerd forward '{ type filter hook forward priority filter; policy accept; }'
+            nft add rule ip containerd forward ip saddr 172.20.0.0/16 accept
+            nft add rule ip containerd forward ip daddr 172.20.0.0/16 accept
+        fi
+        # IPv6 规则（仅当使用 IPv6 网络时）
+        if [[ "${independent_ipv6,,}" == "y" ]]; then
+            if ! nft list table ip6 containerd >/dev/null 2>&1; then
+                nft add table ip6 containerd
+                nft add chain ip6 containerd forward '{ type filter hook forward priority filter; policy accept; }'
+                nft add rule ip6 containerd forward iifname "ctn-br1" accept
+                nft add rule ip6 containerd forward oifname "ctn-br1" accept
+            fi
+            if [[ -f /usr/local/bin/containerd_ipv6_subnet ]]; then
+                local ipv6_subnet
+                ipv6_subnet=$(cat /usr/local/bin/containerd_ipv6_subnet)
+                if ! nft list chain ip6 containerd forward 2>/dev/null | grep -q "$ipv6_subnet"; then
+                    nft add rule ip6 containerd forward ip6 saddr "$ipv6_subnet" accept 2>/dev/null || true
+                    nft add rule ip6 containerd forward ip6 daddr "$ipv6_subnet" accept 2>/dev/null || true
+                fi
+            fi
+        fi
+    elif command -v iptables >/dev/null 2>&1; then
+        # 回退使用 iptables
         iptables -t nat -C POSTROUTING -s 172.20.0.0/16 ! -d 172.20.0.0/16 -j MASQUERADE 2>/dev/null || \
             iptables -t nat -A POSTROUTING -s 172.20.0.0/16 ! -d 172.20.0.0/16 -j MASQUERADE 2>/dev/null || true
-        # IPv4 FORWARD
         iptables -C FORWARD -s 172.20.0.0/16 -j ACCEPT 2>/dev/null || \
             iptables -A FORWARD -s 172.20.0.0/16 -j ACCEPT 2>/dev/null || true
         iptables -C FORWARD -d 172.20.0.0/16 -j ACCEPT 2>/dev/null || \
             iptables -A FORWARD -d 172.20.0.0/16 -j ACCEPT 2>/dev/null || true
-    fi
-    # IPv6 FORWARD（仅当使用 IPv6 网络时）
-    if [[ "${independent_ipv6,,}" == "y" ]] && command -v ip6tables >/dev/null 2>&1; then
-        ip6tables -C FORWARD -i ctn-br1 -j ACCEPT 2>/dev/null || \
-            ip6tables -A FORWARD -i ctn-br1 -j ACCEPT 2>/dev/null || true
-        ip6tables -C FORWARD -o ctn-br1 -j ACCEPT 2>/dev/null || \
-            ip6tables -A FORWARD -o ctn-br1 -j ACCEPT 2>/dev/null || true
-        if [[ -f /usr/local/bin/containerd_ipv6_subnet ]]; then
-            local ipv6_subnet
-            ipv6_subnet=$(cat /usr/local/bin/containerd_ipv6_subnet)
-            ip6tables -C FORWARD -s "${ipv6_subnet}" -j ACCEPT 2>/dev/null || \
-                ip6tables -A FORWARD -s "${ipv6_subnet}" -j ACCEPT 2>/dev/null || true
-            ip6tables -C FORWARD -d "${ipv6_subnet}" -j ACCEPT 2>/dev/null || \
-                ip6tables -A FORWARD -d "${ipv6_subnet}" -j ACCEPT 2>/dev/null || true
+        # IPv6 FORWARD（仅当使用 IPv6 网络时）
+        if [[ "${independent_ipv6,,}" == "y" ]] && command -v ip6tables >/dev/null 2>&1; then
+            ip6tables -C FORWARD -i ctn-br1 -j ACCEPT 2>/dev/null || \
+                ip6tables -A FORWARD -i ctn-br1 -j ACCEPT 2>/dev/null || true
+            ip6tables -C FORWARD -o ctn-br1 -j ACCEPT 2>/dev/null || \
+                ip6tables -A FORWARD -o ctn-br1 -j ACCEPT 2>/dev/null || true
+            if [[ -f /usr/local/bin/containerd_ipv6_subnet ]]; then
+                local ipv6_subnet
+                ipv6_subnet=$(cat /usr/local/bin/containerd_ipv6_subnet)
+                ip6tables -C FORWARD -s "${ipv6_subnet}" -j ACCEPT 2>/dev/null || \
+                    ip6tables -A FORWARD -s "${ipv6_subnet}" -j ACCEPT 2>/dev/null || true
+                ip6tables -C FORWARD -d "${ipv6_subnet}" -j ACCEPT 2>/dev/null || \
+                    ip6tables -A FORWARD -d "${ipv6_subnet}" -j ACCEPT 2>/dev/null || true
+            fi
         fi
     fi
 
