@@ -135,6 +135,17 @@ if command -v ip6tables >/dev/null 2>&1; then
 fi
 # 清理持久化规则文件
 rm -f /etc/iptables/rules.v4 /etc/iptables/rules.v6 2>/dev/null || true
+rm -f /etc/sysconfig/iptables /etc/sysconfig/ip6tables 2>/dev/null || true
+# 停止并禁用 netfilter-persistent（iptables-persistent）
+if command -v systemctl >/dev/null 2>&1; then
+    if systemctl is-active --quiet netfilter-persistent 2>/dev/null; then
+        systemctl stop netfilter-persistent 2>/dev/null || true
+    fi
+    if systemctl is-enabled --quiet netfilter-persistent 2>/dev/null; then
+        systemctl disable netfilter-persistent 2>/dev/null || true
+        _yellow "  已禁用 netfilter-persistent 服务"
+    fi
+fi
 _green "  防火墙规则已清理"
 
 # ======== 6. 删除 nerdctl-full 二进制及配置 ========

@@ -251,6 +251,30 @@ download_and_load_image() {
     exit 1
 }
 
+# ======== 持久化 iptables/ip6tables 规则 ========
+persist_iptables_rules() {
+    mkdir -p /etc/iptables 2>/dev/null || true
+    if command -v iptables-save >/dev/null 2>&1; then
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+    fi
+    if command -v ip6tables-save >/dev/null 2>&1; then
+        ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
+    fi
+    if [[ "$SYSTEM" == "Debian" || "$SYSTEM" == "Ubuntu" ]]; then
+        if ! command -v netfilter-persistent >/dev/null 2>&1; then
+            ${PACKAGE_INSTALL[int]} iptables-persistent 2>/dev/null || true
+        fi
+        if command -v systemctl >/dev/null 2>&1; then
+            systemctl enable netfilter-persistent 2>/dev/null || true
+            systemctl restart netfilter-persistent 2>/dev/null || true
+        fi
+    elif [[ "$SYSTEM" == "CentOS" || "$SYSTEM" == "Fedora" ]]; then
+        service iptables save 2>/dev/null || \
+            iptables-save > /etc/sysconfig/iptables 2>/dev/null || true
+    fi
+    _green "iptables/ip6tables rules persisted"
+}
+
 # ======== 下载 SSH 初始化脚本 ========
 download_ssh_scripts() {
     local cname="$1"
@@ -392,6 +416,8 @@ main() {
                     ip6tables -A FORWARD -d "${ipv6_subnet}" -j ACCEPT 2>/dev/null || true
             fi
         fi
+        # 持久化 iptables/ip6tables 规则
+        persist_iptables_rules
     fi
 
     # 下载并执行 SSH 初始化脚本
