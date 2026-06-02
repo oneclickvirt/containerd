@@ -4,15 +4,50 @@
 # 2026.03.01
 
 # 批量开设 containerd 容器脚本
-# 交互式创建多个 Linux 容器，记录到 ctlog 日志文件
+# 交互式或无交互创建多个 Linux 容器，记录到 ctlog 日志文件
+#
+# Supported environment variables (non-interactive mode / 支持的无交互变量):
+#   noninteractive=true              - Use defaults for prompts / 使用默认值跳过交互提示
+#   CONTAINERD_CREATE_COUNT=1        - Number of containers to create / 新增容器数量
+#   CONTAINERD_CONTAINER_MEMORY=512  - Memory per container in MB / 单容器内存 MB
+#   CONTAINERD_CONTAINER_CPU=1       - CPU cores per container / 单容器 CPU
+#   CONTAINERD_CONTAINER_DISK=0      - Disk limit in GB, btrfs only / 单容器磁盘限制 GB
+#   CONTAINERD_CONTAINER_SYSTEM=debian - Container system / 容器系统
+#   CONTAINERD_CONTAINER_IPV6=n      - Assign independent IPv6 if available / 可用时分配独立 IPv6
 
 _red()    { echo -e "\033[31m\033[01m$*\033[0m"; }
 _green()  { echo -e "\033[32m\033[01m$*\033[0m"; }
 _yellow() { echo -e "\033[33m\033[01m$*\033[0m"; }
 _blue()   { echo -e "\033[36m\033[01m$*\033[0m"; }
 reading() { read -rp "$(_green "$1")" "$2"; }
+is_noninteractive() {
+    case "$(printf '%s' "${noninteractive:-}" | tr '[:upper:]' '[:lower:]')" in
+        true|yes|y|1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+is_yes() {
+    case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+        y|yes|true|1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+valid_nonnegative_integer() { [[ "$1" =~ ^[0-9]+$ ]]; }
+valid_positive_integer() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
+valid_cpu_value() {
+    [[ "$1" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]] || return 1
+    [[ "$1" =~ ^0*([.]0*)?$ ]] && return 1
+    return 0
+}
 export DEBIAN_FRONTEND=noninteractive
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+
+DEFAULT_CREATE_COUNT=1
+DEFAULT_CONTAINER_MEMORY=512
+DEFAULT_CONTAINER_CPU=1
+DEFAULT_CONTAINER_DISK=0
+DEFAULT_CONTAINER_SYSTEM="debian"
+DEFAULT_CONTAINER_IPV6="n"
 
 if [ "$(id -u)" != "0" ]; then
     _red "This script must be run as root" 1>&2
@@ -116,16 +151,49 @@ check_log() {
 # ======== 交互式创建 ========
 build_new_containers() {
     # 询问容器数量
-    reading "需要新增几个容器？ (How many containers to create?) [default: 1]: " new_nums
-    [[ -z "$new_nums" || ! "$new_nums" =~ ^[0-9]+$ ]] && new_nums=1
+    if [[ -n "${CONTAINERD_CREATE_COUNT:-}" ]]; then
+        new_nums="${CONTAINERD_CREATE_COUNT}"
+        _blue "[non-interactive] CONTAINERD_CREATE_COUNT=${CONTAINERD_CREATE_COUNT}"
+    elif is_noninteractive; then
+        new_nums="$DEFAULT_CREATE_COUNT"
+        _blue "[non-interactive] noninteractive=true, CONTAINERD_CREATE_COUNT defaulting to ${new_nums}"
+    else
+        reading "需要新增几个容器？ (How many containers to create?) [default: ${DEFAULT_CREATE_COUNT}]: " new_nums
+    fi
+    if [[ -z "$new_nums" ]] || ! valid_nonnegative_integer "$new_nums"; then
+        _yellow "Invalid container count '${new_nums}', using ${DEFAULT_CREATE_COUNT}"
+        new_nums="$DEFAULT_CREATE_COUNT"
+    fi
 
     # 询问内存大小
-    reading "每个容器内存大小(MB) (Memory per container in MB) [default: 512]: " memory_nums
-    [[ -z "$memory_nums" || ! "$memory_nums" =~ ^[0-9]+$ ]] && memory_nums=512
+    if [[ -n "${CONTAINERD_CONTAINER_MEMORY:-}" ]]; then
+        memory_nums="${CONTAINERD_CONTAINER_MEMORY}"
+        _blue "[non-interactive] CONTAINERD_CONTAINER_MEMORY=${CONTAINERD_CONTAINER_MEMORY}"
+    elif is_noninteractive; then
+        memory_nums="$DEFAULT_CONTAINER_MEMORY"
+        _blue "[non-interactive] noninteractive=true, CONTAINERD_CONTAINER_MEMORY defaulting to ${memory_nums}"
+    else
+        reading "每个容器内存大小(MB) (Memory per container in MB) [default: ${DEFAULT_CONTAINER_MEMORY}]: " memory_nums
+    fi
+    if [[ -z "$memory_nums" ]] || ! valid_positive_integer "$memory_nums"; then
+        _yellow "Invalid memory '${memory_nums}', using ${DEFAULT_CONTAINER_MEMORY}MB"
+        memory_nums="$DEFAULT_CONTAINER_MEMORY"
+    fi
 
     # 询问 CPU
-    reading "每个容器 CPU 核数 (CPU cores per container, e.g. 1 or 0.5) [default: 1]: " cpu_nums
-    [[ -z "$cpu_nums" ]] && cpu_nums=1
+    if [[ -n "${CONTAINERD_CONTAINER_CPU:-}" ]]; then
+        cpu_nums="${CONTAINERD_CONTAINER_CPU}"
+        _blue "[non-interactive] CONTAINERD_CONTAINER_CPU=${CONTAINERD_CONTAINER_CPU}"
+    elif is_noninteractive; then
+        cpu_nums="$DEFAULT_CONTAINER_CPU"
+        _blue "[non-interactive] noninteractive=true, CONTAINERD_CONTAINER_CPU defaulting to ${cpu_nums}"
+    else
+        reading "每个容器 CPU 核数 (CPU cores per container, e.g. 1 or 0.5) [default: ${DEFAULT_CONTAINER_CPU}]: " cpu_nums
+    fi
+    if [[ -z "$cpu_nums" ]] || ! valid_cpu_value "$cpu_nums"; then
+        _yellow "Invalid CPU value '${cpu_nums}', using ${DEFAULT_CONTAINER_CPU}"
+        cpu_nums="$DEFAULT_CONTAINER_CPU"
+    fi
 
     # 检查存储驱动是否支持硬盘限制（仅 btrfs 支持）
     disk_size=0
@@ -134,8 +202,19 @@ build_new_containers() {
         storage_driver=$(cat /usr/local/bin/containerd_storage_driver)
     fi
     if [ "$storage_driver" = "btrfs" ]; then
-        reading "磁盘限制(GB) (Disk limit in GB, 0=unlimited) [default: 0]: " disk_size
-        [[ -z "$disk_size" || ! "$disk_size" =~ ^[0-9]+$ ]] && disk_size=0
+        if [[ -n "${CONTAINERD_CONTAINER_DISK:-}" ]]; then
+            disk_size="${CONTAINERD_CONTAINER_DISK}"
+            _blue "[non-interactive] CONTAINERD_CONTAINER_DISK=${CONTAINERD_CONTAINER_DISK}"
+        elif is_noninteractive; then
+            disk_size="$DEFAULT_CONTAINER_DISK"
+            _blue "[non-interactive] noninteractive=true, CONTAINERD_CONTAINER_DISK defaulting to ${disk_size}"
+        else
+            reading "磁盘限制(GB) (Disk limit in GB, 0=unlimited) [default: ${DEFAULT_CONTAINER_DISK}]: " disk_size
+        fi
+        if [[ -z "$disk_size" ]] || ! valid_nonnegative_integer "$disk_size"; then
+            _yellow "Invalid disk limit '${disk_size}', using ${DEFAULT_CONTAINER_DISK}"
+            disk_size="$DEFAULT_CONTAINER_DISK"
+        fi
     else
         _yellow "当前快照器（$storage_driver）不支持硬盘大小限制，磁盘参数设为0"
         _yellow "Current snapshotter ($storage_driver) does not support disk size limitation, setting disk to 0"
@@ -144,13 +223,21 @@ build_new_containers() {
 
     # 询问系统
     _blue "可选系统: ubuntu / debian / alpine / almalinux / rockylinux / openeuler"
-    reading "选择系统 (Choose system) [default: debian]: " system_type
-    [[ -z "$system_type" ]] && system_type="debian"
+    if [[ -n "${CONTAINERD_CONTAINER_SYSTEM:-}" ]]; then
+        system_type="${CONTAINERD_CONTAINER_SYSTEM}"
+        _blue "[non-interactive] CONTAINERD_CONTAINER_SYSTEM=${CONTAINERD_CONTAINER_SYSTEM}"
+    elif is_noninteractive; then
+        system_type="$DEFAULT_CONTAINER_SYSTEM"
+        _blue "[non-interactive] noninteractive=true, CONTAINERD_CONTAINER_SYSTEM defaulting to ${system_type}"
+    else
+        reading "选择系统 (Choose system) [default: ${DEFAULT_CONTAINER_SYSTEM}]: " system_type
+    fi
+    [[ -z "$system_type" ]] && system_type="$DEFAULT_CONTAINER_SYSTEM"
     system_type=$(echo "$system_type" | tr '[:upper:]' '[:lower:]')
     # 验证
     if [[ ! "$system_type" =~ ^(ubuntu|debian|alpine|almalinux|rockylinux|openeuler)$ ]]; then
-        _yellow "Unknown system '${system_type}', using debian"
-        system_type="debian"
+        _yellow "Unknown system '${system_type}', using ${DEFAULT_CONTAINER_SYSTEM}"
+        system_type="$DEFAULT_CONTAINER_SYSTEM"
     fi
 
     # 询问是否附加独立 IPv6
@@ -162,8 +249,18 @@ build_new_containers() {
     fi
     independent_ipv6="n"
     if [[ "$IPV6_AVAILABLE" == "true" ]]; then
-        reading "是否为每个容器分配独立 IPv6？ (Assign independent IPv6 to each container?) [y/N]: " ipv6_choice
-        [[ "${ipv6_choice,,}" == "y" ]] && independent_ipv6="y"
+        if [[ -n "${CONTAINERD_CONTAINER_IPV6:-}" ]]; then
+            ipv6_choice="${CONTAINERD_CONTAINER_IPV6}"
+            _blue "[non-interactive] CONTAINERD_CONTAINER_IPV6=${CONTAINERD_CONTAINER_IPV6}"
+        elif is_noninteractive; then
+            ipv6_choice="$DEFAULT_CONTAINER_IPV6"
+            _blue "[non-interactive] noninteractive=true, CONTAINERD_CONTAINER_IPV6 defaulting to ${ipv6_choice}"
+        else
+            reading "是否为每个容器分配独立 IPv6？ (Assign independent IPv6 to each container?) [y/N]: " ipv6_choice
+        fi
+        is_yes "$ipv6_choice" && independent_ipv6="y"
+    elif [[ -n "${CONTAINERD_CONTAINER_IPV6:-}" ]] && is_yes "${CONTAINERD_CONTAINER_IPV6}"; then
+        _yellow "CONTAINERD_CONTAINER_IPV6 requested, but containerd IPv6 network is unavailable; using n"
     fi
 
     local disk_limit_info="无限制 (overlayfs)"
@@ -244,14 +341,7 @@ show_log() {
         while IFS= read -r line || [[ -n "$line" ]]; do
             [[ -z "$line" ]] && continue
             local n sshp pw cp mem sp ep dk
-            n=$(echo "$line"  | awk '{print $1}')
-            sshp=$(echo "$line" | awk '{print $2}')
-            pw=$(echo "$line"  | awk '{print $3}')
-            cp=$(echo "$line"  | awk '{print $4}')
-            mem=$(echo "$line" | awk '{print $5}')
-            sp=$(echo "$line"  | awk '{print $6}')
-            ep=$(echo "$line"  | awk '{print $7}')
-            dk=$(echo "$line"  | awk '{print $8}')
+            read -r n sshp pw cp mem sp ep dk _ <<< "$line"
             _blue "  名称:${n}  SSH端口:${sshp}  密码:${pw}  CPU:${cp}  内存:${mem}MB  端口:${sp}-${ep}  磁盘:${dk}GB"
         done < "$log_file"
         echo

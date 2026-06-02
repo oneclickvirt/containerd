@@ -19,6 +19,24 @@
 bash <(wget -qO- https://raw.githubusercontent.com/oneclickvirt/containerd/main/containerdinstall.sh)
 ```
 
+无交互安装统一使用：
+
+```bash
+export noninteractive=true
+bash <(wget -qO- https://raw.githubusercontent.com/oneclickvirt/containerd/main/containerdinstall.sh)
+```
+
+可配合环境变量覆盖默认值：
+
+```bash
+export noninteractive=true
+export NEED_DISK_LIMIT=y
+export CONTAINERD_POOL_SIZE=20
+export CONTAINERD_INSTALL_PATH=/var/lib/containerd
+export CONTAINERD_LOOP_FILE=/opt/containerd-pool.img
+bash <(wget -qO- https://raw.githubusercontent.com/oneclickvirt/containerd/main/containerdinstall.sh)
+```
+
 ## 开设单个容器
 
 ```bash
@@ -58,6 +76,19 @@ chmod +x create_containerd.sh
 
 交互式脚本，自动递增容器名（ct1, ct2, ...）、SSH 端口、公网端口，容器信息记录到 `ctlog` 文件。
 
+无交互批量开设统一使用：
+
+```bash
+export noninteractive=true
+export CONTAINERD_CREATE_COUNT=1
+export CONTAINERD_CONTAINER_MEMORY=512
+export CONTAINERD_CONTAINER_CPU=1
+export CONTAINERD_CONTAINER_DISK=0
+export CONTAINERD_CONTAINER_SYSTEM=debian
+export CONTAINERD_CONTAINER_IPV6=n
+./create_containerd.sh
+```
+
 ## 查看与管理容器
 
 ```bash
@@ -79,6 +110,13 @@ bash <(wget -qO- https://raw.githubusercontent.com/oneclickvirt/containerd/main/
 ```
 
 脚本会在执行前要求输入 `yes` 确认，操作不可逆。
+
+无交互卸载统一使用：
+
+```bash
+export noninteractive=true
+bash <(wget -qO- https://raw.githubusercontent.com/oneclickvirt/containerd/main/containerduninstall.sh)
+```
 
 ## 镜像说明
 
@@ -102,4 +140,3 @@ bash <(wget -qO- https://raw.githubusercontent.com/oneclickvirt/containerd/main/
 ## Stargazers over time
 
 [![Stargazers over time](https://starchart.cc/oneclickvirt/containerd.svg)](https://starchart.cc/oneclickvirt/containerd)
-

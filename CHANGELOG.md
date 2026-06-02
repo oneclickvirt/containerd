@@ -1,3 +1,8 @@
+2026.06.02
+- 统一无交互入口：安装、批量创建、卸载脚本均支持 `export noninteractive=true`，并在无交互模式下使用清晰默认值避免 stdin 阻塞
+- 批量创建脚本新增环境变量覆盖：`CONTAINERD_CREATE_COUNT`、`CONTAINERD_CONTAINER_MEMORY`、`CONTAINERD_CONTAINER_CPU`、`CONTAINERD_CONTAINER_DISK`、`CONTAINERD_CONTAINER_SYSTEM`、`CONTAINERD_CONTAINER_IPV6`
+- 优化批量创建日志展示，使用一次 shell 字段解析替代每行多次 `awk` 调用，避免不必要的重复外部命令
+
 2026.03.02
 - 修复容器创建后未正确配置 NAT 到宿主机公网 IP 的问题：在 containerdinstall.sh 新增 setup_iptables_nat() 函数，显式添加 IPv4 MASQUERADE 和 FORWARD 规则（基于子网而非网桥接口，避免接口未创建时规则失效）
 - 修复 adapt_ipv6() 仅配置 sysctl 而缺少 ip6tables FORWARD 规则的问题：新增 ip6tables FORWARD 规则允许 ctn-br1 和 IPv6 子网双向流量

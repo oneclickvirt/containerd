@@ -5,15 +5,30 @@
 # 完整卸载 containerd 环境及所有容器
 #
 # Supported environment variables (non-interactive mode / 支持的环境变量，可实现无交互卸载):
+#   noninteractive=true          - Skip confirmation prompt / 跳过确认提示直接卸载
 #   CONFIRM_UNINSTALL=yes       - Skip confirmation prompt / 跳过确认提示直接卸载
 #
 # Example / 示例:
+#   export noninteractive=true
+#   bash containerduninstall.sh
 #   CONFIRM_UNINSTALL=yes bash containerduninstall.sh
 
 _red()    { echo -e "\033[31m\033[01m$*\033[0m"; }
 _green()  { echo -e "\033[32m\033[01m$*\033[0m"; }
 _yellow() { echo -e "\033[33m\033[01m$*\033[0m"; }
 _blue()   { echo -e "\033[36m\033[01m$*\033[0m"; }
+is_noninteractive() {
+    case "$(printf '%s' "${noninteractive:-}" | tr '[:upper:]' '[:lower:]')" in
+        true|yes|y|1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
+is_yes() {
+    case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
+        y|yes|true|1) return 0 ;;
+        *) return 1 ;;
+    esac
+}
 
 if [ "$(id -u)" != "0" ]; then
     _red "This script must be run as root"
@@ -27,7 +42,10 @@ echo "  包含：所有运行中/停止的容器、所有镜像、"
 echo "  CNI 网络、systemd 服务、nerdctl/containerd 二进制"
 echo "  操作不可逆！"
 echo "======================================================"
-if [[ "${CONFIRM_UNINSTALL:-}" == "yes" ]]; then
+if is_noninteractive; then
+    confirm="yes"
+    _blue "[non-interactive] noninteractive=true, proceeding with uninstall..."
+elif is_yes "${CONFIRM_UNINSTALL:-}"; then
     confirm="yes"
     _blue "[non-interactive] CONFIRM_UNINSTALL=yes, proceeding with uninstall..."
 else
