@@ -311,19 +311,148 @@ image_ref_exists() {
         nerdctl image inspect "docker.io/$img" >/dev/null 2>&1
 }
 
+repair_oci_archive_platform() {
+    local tar_gz_path="$1"
+    local platform="$2"
+    local arch
+    arch="${platform##*/}"  # "linux/amd64" -> "amd64"
+
+    _yellow "Checking and repairing OCI archive platform field (arch: ${arch})..."
+
+    # Validate the gzip file first
+    if ! gzip -t "$tar_gz_path" 2>/dev/null; then
+        _yellow "gzip integrity check failed, skipping repair"
+        return 1
+    fi
+    if ! tar -tzf "$tar_gz_path" >/dev/null 2>&1; then
+        _yellow "tar listing failed, skipping repair"
+        return 1
+    fi
+
+    # Check if python3 is available
+    if ! command -v python3 >/dev/null 2>&1; then
+        _yellow "python3 not available, skipping OCI repair"
+        return 1
+    fi
+
+    # Inline Python: patch index.json (OCI) or manifest.json (Docker) inside the gzipped tar.
+    python3 - "$tar_gz_path" "$arch" <<'PYREPAIR' 2>/dev/null || return 1
+import json, tarfile, io, sys, os, gzip, tempfile, shutil
+
+tar_gz_path, arch = sys.argv[1], sys.argv[2]
+platform_obj = {"architecture": arch, "os": "linux"}
+
+# Decompress to a temp tar
+with gzip.open(tar_gz_path, "rb") as f_in:
+    raw_tar = f_in.read()
+
+with tarfile.open(fileobj=io.BytesIO(raw_tar)) as tf:
+    names = tf.getnames()
+
+needs_repair = False
+
+if "index.json" in names:
+    with tarfile.open(fileobj=io.BytesIO(raw_tar)) as tf:
+        idx_data = json.loads(tf.extractfile("index.json").read())
+    for m in idx_data.get("manifests", []):
+        if "platform" not in m:
+            m["platform"] = platform_obj
+            needs_repair = True
+    if not needs_repair:
+        sys.exit(0)  # Already has platform, nothing to do
+    fixed_idx = json.dumps(idx_data, separators=(",", ":")).encode() + b"\n"
+
+    out_bio = io.BytesIO()
+    with tarfile.open(fileobj=out_bio, mode="w") as out:
+        with tarfile.open(fileobj=io.BytesIO(raw_tar)) as tf:
+            for member in tf.getmembers():
+                if member.name == "index.json":
+                    member.size = len(fixed_idx)
+                    out.addfile(member, io.BytesIO(fixed_idx))
+                else:
+                    out.addfile(member, tf.extractfile(member))
+    out_bio.seek(0)
+    new_raw_tar = out_bio.read()
+
+elif "manifest.json" in names:
+    with tarfile.open(fileobj=io.BytesIO(raw_tar)) as tf:
+        mf_data = json.loads(tf.extractfile("manifest.json").read())
+    for entry in mf_data:
+        if "platform" not in entry:
+            entry["platform"] = {"os": "linux", "architecture": arch}
+            needs_repair = True
+    if not needs_repair:
+        sys.exit(0)
+    fixed_mf = json.dumps(mf_data, separators=(",", ":")).encode() + b"\n"
+
+    out_bio = io.BytesIO()
+    with tarfile.open(fileobj=out_bio, mode="w") as out:
+        with tarfile.open(fileobj=io.BytesIO(raw_tar)) as tf:
+            for member in tf.getmembers():
+                if member.name == "manifest.json":
+                    member.size = len(fixed_mf)
+                    out.addfile(member, io.BytesIO(fixed_mf))
+                else:
+                    out.addfile(member, tf.extractfile(member))
+    out_bio.seek(0)
+    new_raw_tar = out_bio.read()
+else:
+    sys.exit(1)  # Unknown format
+
+# Recompress
+with gzip.open(tar_gz_path, "wb") as f_out:
+    f_out.write(new_raw_tar)
+
+print(f"[OK] Platform field injected: {platform_obj}")
+PYREPAIR
+    local ret=$?
+    if [[ $ret -eq 0 ]]; then
+        _green "OCI archive platform field repaired (${platform})"
+        return 0
+    fi
+    return 1
+}
+
 load_image_archive() {
     local tar_path="$1"
     local platform="$2"
 
-    # nerdctl/containerd 2.x may fail multi-platform imports without an explicit platform:
-    # "unable to initialize unpacker: no unpack platforms defined".
+    # Step 0: Validate the archive
+    if ! gzip -t "$tar_path" 2>/dev/null; then
+        _yellow "gzip integrity check failed for ${tar_path}"
+    fi
+
+    # Step 1: Attempt to repair platform info in index.json / manifest.json.
+    # This fixes the "no unpack platforms defined" error in containerd/nerdctl v2.3.1+
+    # caused by docker save omitting the platform field from OCI index.json.
+    repair_oci_archive_platform "$tar_path" "$platform" || true
+
+    # Step 2: Try nerdctl load with explicit --platform
     if nerdctl load --platform="$platform" --input="$tar_path"; then
         return 0
     fi
 
-    _yellow "nerdctl load failed, trying ctr import with --local and explicit platform..."
-    if command -v ctr >/dev/null 2>&1 && ctr images import --local --platform "$platform" "$tar_path"; then
+    # Step 3: Try nerdctl load with --all-platforms (may pick the only one available)
+    _yellow "nerdctl load --platform failed, trying --all-platforms..."
+    if nerdctl load --all-platforms --input="$tar_path"; then
         return 0
+    fi
+
+    # Step 4: Fall back to ctr import with explicit --platform
+    _yellow "nerdctl load --all-platforms also failed, trying ctr import with --local and explicit platform..."
+    if command -v ctr >/dev/null 2>&1; then
+        # ctr images import doesn't handle .tar.gz directly; decompress first
+        local tmp_tar="${tar_path%.gz}"
+        if [[ "$tar_path" == *.gz ]]; then
+            gzip -dc "$tar_path" > "$tmp_tar"
+            if ctr images import --local --platform "$platform" "$tmp_tar"; then
+                rm -f "$tmp_tar"
+                return 0
+            fi
+            rm -f "$tmp_tar"
+        elif ctr images import --local --platform "$platform" "$tar_path"; then
+            return 0
+        fi
     fi
 
     return 1

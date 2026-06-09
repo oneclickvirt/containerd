@@ -67,7 +67,76 @@ jobs:
             --tag spiritlhl/${{ matrix.tag_prefix }}:latest \
             --output type=docker \
             dockerfiles/
-          docker save spiritlhl/${{ matrix.tag_prefix }}:latest | gzip > spiritlhl_${{ matrix.tag_prefix }}_amd64.tar.gz
+          docker save spiritlhl/${{ matrix.tag_prefix }}:latest > /tmp/raw_${{ matrix.tag_prefix }}_amd64.tar
+          python3 - "${{ matrix.tag_prefix }}" amd64 /tmp/raw_${{ matrix.tag_prefix }}_amd64.tar <<'PYFIX'
+          import json, tarfile, io, sys, os
+
+          system, arch, tar_path = sys.argv[1], sys.argv[2], sys.argv[3]
+          platform = {"architecture": arch, "os": "linux"}
+
+          with open(tar_path, "rb") as f:
+              raw = f.read()
+
+          bio = io.BytesIO(raw)
+          with tarfile.open(fileobj=bio) as tf:
+              names = tf.getnames()
+
+          if "index.json" in names:
+              # OCI layout: patch index.json with platform
+              with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
+                  idx_data = json.loads(tf.extractfile("index.json").read())
+              for m in idx_data.get("manifests", []):
+                  if "platform" not in m:
+                      m["platform"] = platform
+              fixed_idx = json.dumps(idx_data, separators=(",", ":")).encode() + b"\n"
+
+              out_bio = io.BytesIO()
+              with tarfile.open(fileobj=out_bio, mode="w") as out:
+                  with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
+                      for member in tf.getmembers():
+                          if member.name == "index.json":
+                              member.size = len(fixed_idx)
+                              out.addfile(member, io.BytesIO(fixed_idx))
+                          else:
+                              out.addfile(member, tf.extractfile(member))
+              out_bio.seek(0)
+              with open(tar_path, "wb") as f:
+                  f.write(out_bio.read())
+              print(f"[OK] OCI index.json patched with platform: {platform}")
+          elif "manifest.json" in names:
+              # Docker format: inject platform into manifest entries
+              with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
+                  mf_data = json.loads(tf.extractfile("manifest.json").read())
+              for entry in mf_data:
+                  if "platform" not in entry:
+                      entry["platform"] = {"os": "linux", "architecture": arch}
+                  # also ensure Config is present (docker save with single-platform buildx may omit it)
+                  if "Config" not in entry or not entry["Config"]:
+                      # look for a config blob
+                      for name in names:
+                          if name.endswith(".json") and name not in ("manifest.json",):
+                              entry["Config"] = name + ".json" if not name.endswith(".json") else name
+                              break
+              fixed_mf = json.dumps(mf_data, separators=(",", ":")).encode() + b"\n"
+
+              out_bio = io.BytesIO()
+              with tarfile.open(fileobj=out_bio, mode="w") as out:
+                  with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
+                      for member in tf.getmembers():
+                          if member.name == "manifest.json":
+                              member.size = len(fixed_mf)
+                              out.addfile(member, io.BytesIO(fixed_mf))
+                          else:
+                              out.addfile(member, tf.extractfile(member))
+              out_bio.seek(0)
+              with open(tar_path, "wb") as f:
+                  f.write(out_bio.read())
+              print(f"[OK] Docker manifest.json patched with platform: {platform}")
+          else:
+              print(f"[WARN] No index.json or manifest.json found; leaving tar unchanged")
+          PYFIX
+          gzip < /tmp/raw_${{ matrix.tag_prefix }}_amd64.tar > spiritlhl_${{ matrix.tag_prefix }}_amd64.tar.gz
+          rm -f /tmp/raw_${{ matrix.tag_prefix }}_amd64.tar
           echo "amd64 tar size: $(du -sh spiritlhl_${{ matrix.tag_prefix }}_amd64.tar.gz)"
 
       - name: Build and export arm64 tar
@@ -78,7 +147,72 @@ jobs:
             --tag spiritlhl/${{ matrix.tag_prefix }}:latest \
             --output type=docker \
             dockerfiles/
-          docker save spiritlhl/${{ matrix.tag_prefix }}:latest | gzip > spiritlhl_${{ matrix.tag_prefix }}_arm64.tar.gz
+          docker save spiritlhl/${{ matrix.tag_prefix }}:latest > /tmp/raw_${{ matrix.tag_prefix }}_arm64.tar
+          python3 - "${{ matrix.tag_prefix }}" arm64 /tmp/raw_${{ matrix.tag_prefix }}_arm64.tar <<'PYFIX'
+          import json, tarfile, io, sys, os
+
+          system, arch, tar_path = sys.argv[1], sys.argv[2], sys.argv[3]
+          platform = {"architecture": arch, "os": "linux"}
+
+          with open(tar_path, "rb") as f:
+              raw = f.read()
+
+          bio = io.BytesIO(raw)
+          with tarfile.open(fileobj=bio) as tf:
+              names = tf.getnames()
+
+          if "index.json" in names:
+              with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
+                  idx_data = json.loads(tf.extractfile("index.json").read())
+              for m in idx_data.get("manifests", []):
+                  if "platform" not in m:
+                      m["platform"] = platform
+              fixed_idx = json.dumps(idx_data, separators=(",", ":")).encode() + b"\n"
+
+              out_bio = io.BytesIO()
+              with tarfile.open(fileobj=out_bio, mode="w") as out:
+                  with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
+                      for member in tf.getmembers():
+                          if member.name == "index.json":
+                              member.size = len(fixed_idx)
+                              out.addfile(member, io.BytesIO(fixed_idx))
+                          else:
+                              out.addfile(member, tf.extractfile(member))
+              out_bio.seek(0)
+              with open(tar_path, "wb") as f:
+                  f.write(out_bio.read())
+              print(f"[OK] OCI index.json patched with platform: {platform}")
+          elif "manifest.json" in names:
+              with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
+                  mf_data = json.loads(tf.extractfile("manifest.json").read())
+              for entry in mf_data:
+                  if "platform" not in entry:
+                      entry["platform"] = {"os": "linux", "architecture": arch}
+                  if "Config" not in entry or not entry["Config"]:
+                      for name in names:
+                          if name.endswith(".json") and name not in ("manifest.json",):
+                              entry["Config"] = name + ".json" if not name.endswith(".json") else name
+                              break
+              fixed_mf = json.dumps(mf_data, separators=(",", ":")).encode() + b"\n"
+
+              out_bio = io.BytesIO()
+              with tarfile.open(fileobj=out_bio, mode="w") as out:
+                  with tarfile.open(fileobj=io.BytesIO(raw)) as tf:
+                      for member in tf.getmembers():
+                          if member.name == "manifest.json":
+                              member.size = len(fixed_mf)
+                              out.addfile(member, io.BytesIO(fixed_mf))
+                          else:
+                              out.addfile(member, tf.extractfile(member))
+              out_bio.seek(0)
+              with open(tar_path, "wb") as f:
+                  f.write(out_bio.read())
+              print(f"[OK] Docker manifest.json patched with platform: {platform}")
+          else:
+              print(f"[WARN] No index.json or manifest.json found; leaving tar unchanged")
+          PYFIX
+          gzip < /tmp/raw_${{ matrix.tag_prefix }}_arm64.tar > spiritlhl_${{ matrix.tag_prefix }}_arm64.tar.gz
+          rm -f /tmp/raw_${{ matrix.tag_prefix }}_arm64.tar
           echo "arm64 tar size: $(du -sh spiritlhl_${{ matrix.tag_prefix }}_arm64.tar.gz)"
 
       - name: Upload tars to GitHub Release
