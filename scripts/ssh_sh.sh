@@ -5,12 +5,18 @@
 
 # 容器内 SSH 初始化脚本（仅适用于 Alpine Linux）
 
-if [ "$(grep -E '^ID=' /etc/os-release 2>/dev/null | cut -d= -f2)" != "alpine" ]; then
+set -eu
+
+if [ "$(grep -E '^ID=' /etc/os-release 2>/dev/null | cut -d= -f2 || true)" != "alpine" ]; then
     echo "This script only supports Alpine Linux."
     exit 1
 fi
 
-passwd_input="${1:-123456}"
+passwd_input="${1:-}"
+if [ -z "$passwd_input" ]; then
+    echo "Root password argument is required."
+    exit 1
+fi
 
 # 处理 sshd_config.d/ 中的覆盖配置
 config_dir="/etc/ssh/sshd_config.d/"
@@ -52,7 +58,7 @@ fi
 mkdir -p /var/run/sshd
 
 # 设置 root 密码
-echo "root:${passwd_input}" | chpasswd 2>/dev/null || true
+printf '%s:%s\n' root "$passwd_input" | chpasswd 2>/dev/null || true
 
 # 启动 sshd
 rc-update add sshd default 2>/dev/null || true
@@ -60,7 +66,10 @@ rc-update add sshd default 2>/dev/null || true
 
 # 设置 cron 保活
 cron_line="* * * * * pgrep -x sshd>/dev/null||/usr/sbin/sshd"
-(crontab -l 2>/dev/null | grep -v "sshd"; echo "$cron_line") | crontab - 2>/dev/null || true
+{
+    crontab -l 2>/dev/null | grep -v "sshd" || true
+    printf '%s\n' "$cron_line"
+} | crontab - 2>/dev/null || true
 crond 2>/dev/null || true
 
 # 更新 motd

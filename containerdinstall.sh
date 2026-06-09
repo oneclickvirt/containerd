@@ -10,12 +10,17 @@
 #   CONTAINERD_INSTALL_PATH=    - containerd data root path / containerd 数据根路径；默认: /var/lib/containerd
 #   CONTAINERD_POOL_SIZE=20     - Storage pool size in GB / 存储池大小（GB），NEED_DISK_LIMIT=y 时默认: 20
 #   CONTAINERD_LOOP_FILE=       - Loop file path / 循环文件路径；默认: /opt/containerd-pool.img
+#   CONTAINERD_MAIN_INTERFACE=  - Host outbound interface / 宿主机出口网卡；默认自动检测
+#   CONTAINERD_IPV6_SUBNET_PREFIX=80 - IPv6 CNI subnet prefix / IPv6 CNI 子网前缀；默认: 80
+#   CONTAINERD_IPV6_SUBNET_INDEX=1   - IPv6 subnet index cut from /64 / 从 /64 中切出的子网序号；默认: 1
 #
 # Example / 示例:
 #   export noninteractive=true
 #   bash containerdinstall.sh
 #   NEED_DISK_LIMIT=y CONTAINERD_POOL_SIZE=20 bash containerdinstall.sh
 #   CONTAINERD_INSTALL_PATH=/data/containerd bash containerdinstall.sh
+
+set -euo pipefail
 
 _red() { echo -e "\033[31m\033[01m$*\033[0m"; }
 _green() { echo -e "\033[32m\033[01m$*\033[0m"; }
@@ -37,8 +42,10 @@ is_yes() {
 DEFAULT_CONTAINERD_INSTALL_PATH="/var/lib/containerd"
 DEFAULT_CONTAINERD_POOL_SIZE="20"
 DEFAULT_CONTAINERD_LOOP_FILE="/opt/containerd-pool.img"
+DEFAULT_CONTAINERD_IPV6_SUBNET_PREFIX="80"
+DEFAULT_CONTAINERD_IPV6_SUBNET_INDEX="1"
 export DEBIAN_FRONTEND=noninteractive
-utf8_locale=$(locale -a 2>/dev/null | grep -i -m 1 -E "UTF-8|utf8")
+utf8_locale=$(locale -a 2>/dev/null | grep -i -m 1 -E "UTF-8|utf8" || true)
 if [[ -z "$utf8_locale" ]]; then
     _yellow "No UTF-8 locale found"
 else
@@ -77,14 +84,15 @@ PACKAGE_INSTALL=(
 )
 
 CMD=(
-    "$(grep -i pretty_name /etc/os-release 2>/dev/null | cut -d \" -f2)"
-    "$(hostnamectl 2>/dev/null | grep -i system | cut -d : -f2)"
-    "$(lsb_release -sd 2>/dev/null)"
-    "$(grep -i description /etc/lsb-release 2>/dev/null | cut -d \" -f2)"
-    "$(grep . /etc/redhat-release 2>/dev/null)"
-    "$(grep . /etc/issue 2>/dev/null | cut -d \\ -f1 | sed '/^[ ]*$/d')"
-    "$(grep . /etc/alpine-release 2>/dev/null)"
+    "$(grep -i pretty_name /etc/os-release 2>/dev/null | cut -d \" -f2 || true)"
+    "$(hostnamectl 2>/dev/null | grep -i system | cut -d : -f2 || true)"
+    "$(lsb_release -sd 2>/dev/null || true)"
+    "$(grep -i description /etc/lsb-release 2>/dev/null | cut -d \" -f2 || true)"
+    "$(grep . /etc/redhat-release 2>/dev/null || true)"
+    "$(grep . /etc/issue 2>/dev/null | cut -d \\ -f1 | sed '/^[ ]*$/d' || true)"
+    "$(grep . /etc/alpine-release 2>/dev/null || true)"
 )
+SYSTEM=""
 SYS="${CMD[0]}"
 [[ -n $SYS ]] || SYS="${CMD[1]}"
 [[ -n $SYS ]] || SYS="${CMD[2]}"
@@ -128,7 +136,10 @@ cdn_success_url=""
 
 check_cdn() {
     local o_url=$1
-    local shuffled_cdn_urls=($(shuf -e "${cdn_urls[@]}"))
+    local shuffled_cdn_urls=("${cdn_urls[@]}")
+    if command -v shuf >/dev/null 2>&1; then
+        mapfile -t shuffled_cdn_urls < <(printf '%s\n' "${cdn_urls[@]}" | shuf)
+    fi
     for cdn_url in "${shuffled_cdn_urls[@]}"; do
         if curl -4 -sL -k "${cdn_url}${o_url}" --max-time 6 | grep -q "success" >/dev/null 2>&1; then
             export cdn_success_url="$cdn_url"
@@ -180,16 +191,45 @@ is_private_ipv6() {
 }
 
 # ======== 检测公网 IPv6 ========
+detect_global_ipv6_cidr() {
+    local dev="${1:-}"
+    local candidates=""
+    if command -v ip >/dev/null 2>&1; then
+        if [[ -n "$dev" ]]; then
+            candidates=$(ip -6 addr show dev "$dev" scope global 2>/dev/null | awk '/inet6/ {print $2}' || true)
+        fi
+        if [[ -z "$candidates" ]]; then
+            candidates=$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/ {print $2}' || true)
+        fi
+    fi
+
+    local ordered=""
+    ordered=$(printf '%s\n' "$candidates" | awk 'NF {print length($0), $0}' | sort -nr | awk '{print $2}' || true)
+    local cidr addr
+    while IFS= read -r cidr; do
+        [[ -n "$cidr" ]] || continue
+        addr="${cidr%%/*}"
+        if [[ -n "$addr" ]] && ! is_private_ipv6 "$addr"; then
+            printf '%s\n' "$cidr"
+            return 0
+        fi
+    done <<< "$ordered"
+    return 1
+}
+
 check_ipv6() {
-    IPV6=$(ip -6 addr show 2>/dev/null | grep global | awk '{print length, $2}' | sort -nr | head -n 1 | awk '{print $2}' | cut -d '/' -f1)
+    IPV6_CIDR=$(detect_global_ipv6_cidr "${interface:-}" || true)
+    IPV6="${IPV6_CIDR%%/*}"
     if [[ -z "$IPV6" ]] || is_private_ipv6 "$IPV6"; then
+        IPV6_CIDR=""
         IPV6=""
         local API_NET=("https://ipv6.ip.sb" "https://ipget.net" "https://ipv6.ping0.cc" "https://api.my-ip.io/ip" "https://ipv6.icanhazip.com")
         for p in "${API_NET[@]}"; do
             local response
-            response=$(curl -sLk6m8 "$p" 2>/dev/null | tr -d '[:space:]')
-            if [[ $? -eq 0 ]] && echo "$response" | grep -qE '^[0-9a-fA-F:]+$' && echo "$response" | grep -q ':'; then
+            response=$(curl -sLk6m8 "$p" 2>/dev/null | tr -d '[:space:]' || true)
+            if [[ -n "$response" ]] && echo "$response" | grep -qE '^[0-9a-fA-F:]+$' && echo "$response" | grep -q ':'; then
                 IPV6="$response"
+                IPV6_CIDR="${response}/64"
                 break
             fi
             sleep 1
@@ -197,6 +237,7 @@ check_ipv6() {
     fi
     if [[ -n "$IPV6" ]] && ! is_private_ipv6 "$IPV6"; then
         _green "Detected public IPv6: $IPV6"
+        _blue "IPv6 parent prefix: ${IPV6_CIDR:-${IPV6}/64}"
         IPV6_ENABLED=true
     else
         _yellow "No public IPv6 detected"
@@ -206,9 +247,23 @@ check_ipv6() {
 
 # ======== 检测主网络接口 ========
 detect_interface() {
-    interface=$(ip route get 8.8.8.8 2>/dev/null | awk 'NR==1 {for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}')
+    if [[ -n "${CONTAINERD_MAIN_INTERFACE:-}" ]]; then
+        if command -v ip >/dev/null 2>&1 && ip link show "$CONTAINERD_MAIN_INTERFACE" >/dev/null 2>&1; then
+            interface="$CONTAINERD_MAIN_INTERFACE"
+            _blue "[non-interactive] CONTAINERD_MAIN_INTERFACE=${CONTAINERD_MAIN_INTERFACE}"
+        else
+            _red "CONTAINERD_MAIN_INTERFACE='${CONTAINERD_MAIN_INTERFACE}' was not found on this host."
+            exit 1
+        fi
+    else
+        interface=$(ip route get 8.8.8.8 2>/dev/null | awk 'NR==1 {for(i=1;i<=NF;i++) if($i=="dev") print $(i+1)}' || true)
+        if [[ -z "$interface" ]]; then
+            interface=$(ip link show 2>/dev/null | awk '/^[0-9]+: /{gsub(":", "", $2); if($2!="lo") {print $2; exit}}' || true)
+        fi
+    fi
     if [[ -z "$interface" ]]; then
-        interface=$(ip link show | awk '/^[0-9]+: /{gsub(":", "", $2); if($2!="lo") {print $2; exit}}')
+        _red "Failed to detect host outbound network interface."
+        exit 1
     fi
     _blue "Main network interface: $interface"
     echo "$interface" > /usr/local/bin/containerd_main_interface
@@ -292,7 +347,7 @@ setup_containerd_btrfs_loop() {
     if [ -f "$loop_file" ] && losetup -j "$loop_file" 2>/dev/null | grep -q "$loop_file"; then
         _green "Loop file $loop_file already exists and is attached, skipping creation."
         local loop_device
-        loop_device=$(losetup -j "$loop_file" | cut -d: -f1)
+        loop_device=$(losetup -j "$loop_file" | cut -d: -f1 || true)
         mkdir -p "$mount_point"
         mount "$loop_device" "$mount_point" 2>/dev/null || true
         echo "$loop_device" > /usr/local/bin/containerd_loop_device
@@ -378,16 +433,16 @@ install_base_deps() {
         Debian|Ubuntu)
             eval "${PACKAGE_UPDATE[int]}" 2>/dev/null || true
             ${PACKAGE_INSTALL[int]} curl wget ca-certificates nftables iptables iproute2 \
-                socat unzip tar jq 2>/dev/null || true
+                socat unzip tar jq python3 2>/dev/null || true
             ;;
         CentOS|Fedora)
             ${PACKAGE_INSTALL[int]} curl wget ca-certificates nftables iptables iproute \
-                socat unzip tar jq 2>/dev/null || true
+                socat unzip tar jq python3 2>/dev/null || true
             ;;
         Alpine)
             ${PACKAGE_UPDATE[int]} 2>/dev/null || true
             ${PACKAGE_INSTALL[int]} curl wget ca-certificates nftables iptables iproute2 \
-                socat unzip tar jq 2>/dev/null || true
+                socat unzip tar jq python3 2>/dev/null || true
             ;;
     esac
     _green "Base dependencies installed"
@@ -400,7 +455,7 @@ install_containerd_stack() {
     local nerdctl_ver
     nerdctl_ver=$(curl -sL --connect-timeout 10 --max-time 15 \
         "https://api.github.com/repos/containerd/nerdctl/releases/latest" 2>/dev/null \
-        | grep tag_name | cut -d'"' -f4 | sed 's/v//')
+        | grep tag_name | cut -d'"' -f4 | sed 's/v//' || true)
     if [[ -z "$nerdctl_ver" ]]; then
         nerdctl_ver="2.0.4"
     fi
@@ -530,6 +585,7 @@ EOF
         export PATH="/usr/local/bin:$PATH"
     fi
     if [[ ! -f /etc/profile.d/containerd-path.sh ]]; then
+        # shellcheck disable=SC2016
         echo 'export PATH="/usr/local/bin:$PATH"' > /etc/profile.d/containerd-path.sh
         chmod 644 /etc/profile.d/containerd-path.sh
     fi
@@ -546,7 +602,9 @@ configure_containerd() {
     mkdir -p /etc/containerd
     if command -v containerd >/dev/null 2>&1; then
         containerd config default > /etc/containerd/config.toml 2>/dev/null || true
-        sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml
+        if [[ -f /etc/containerd/config.toml ]]; then
+            sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml || true
+        fi
     fi
 
     # 若需要硬盘限制，配置 btrfs 快照器和自定义 data root
@@ -675,12 +733,12 @@ setup_firewall_rules() {
 
 setup_nftables_ipv4() {
     nft delete table ip containerd 2>/dev/null || true
-    nft add table ip containerd
-    nft add chain ip containerd postrouting '{ type nat hook postrouting priority srcnat; policy accept; }'
-    nft add rule ip containerd postrouting ip saddr 172.20.0.0/16 ip daddr != 172.20.0.0/16 masquerade
-    nft add chain ip containerd forward '{ type filter hook forward priority filter; policy accept; }'
-    nft add rule ip containerd forward ip saddr 172.20.0.0/16 accept
-    nft add rule ip containerd forward ip daddr 172.20.0.0/16 accept
+    nft add table ip containerd 2>/dev/null || true
+    nft add chain ip containerd postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
+    nft add rule ip containerd postrouting ip saddr 172.20.0.0/16 ip daddr != 172.20.0.0/16 masquerade 2>/dev/null || true
+    nft add chain ip containerd forward '{ type filter hook forward priority filter; policy accept; }' 2>/dev/null || true
+    nft add rule ip containerd forward ip saddr 172.20.0.0/16 accept 2>/dev/null || true
+    nft add rule ip containerd forward ip daddr 172.20.0.0/16 accept 2>/dev/null || true
     _green "nftables IPv4 NAT/FORWARD rules configured"
 }
 
@@ -777,9 +835,9 @@ start_services() {
         rc-update add containerd default 2>/dev/null || true
         rc-service containerd start 2>/dev/null || true
     else
-        systemctl daemon-reload
-        systemctl enable containerd
-        systemctl restart containerd
+        systemctl daemon-reload 2>/dev/null || true
+        systemctl enable containerd 2>/dev/null || true
+        systemctl restart containerd 2>/dev/null || true
         sleep 3
         systemctl enable buildkit 2>/dev/null || true
         systemctl start buildkit 2>/dev/null || true
@@ -810,13 +868,13 @@ adapt_ipv6() {
 
     if [[ "$FIREWALL_BACKEND" == "nftables" ]]; then
         nft delete table ip6 containerd 2>/dev/null || true
-        nft add table ip6 containerd
-        nft add chain ip6 containerd forward '{ type filter hook forward priority filter; policy accept; }'
-        nft add rule ip6 containerd forward iifname "ctn-br1" accept
-        nft add rule ip6 containerd forward oifname "ctn-br1" accept
+        nft add table ip6 containerd 2>/dev/null || true
+        nft add chain ip6 containerd forward '{ type filter hook forward priority filter; policy accept; }' 2>/dev/null || true
+        nft add rule ip6 containerd forward iifname "ctn-br1" accept 2>/dev/null || true
+        nft add rule ip6 containerd forward oifname "ctn-br1" accept 2>/dev/null || true
         if [[ -n "$ipv6_subnet" ]]; then
-            nft add rule ip6 containerd forward ip6 saddr "$ipv6_subnet" accept
-            nft add rule ip6 containerd forward ip6 daddr "$ipv6_subnet" accept
+            nft add rule ip6 containerd forward ip6 saddr "$ipv6_subnet" accept 2>/dev/null || true
+            nft add rule ip6 containerd forward ip6 daddr "$ipv6_subnet" accept 2>/dev/null || true
         fi
         _green "nftables IPv6 FORWARD rules configured"
     elif [[ "$FIREWALL_BACKEND" == "iptables" ]] && command -v ip6tables >/dev/null 2>&1; then
@@ -838,25 +896,72 @@ adapt_ipv6() {
 # ======== 创建 IPv6 CNI 网络 ========
 create_ipv6_network() {
     local ipv6_addr="$1"
+    local ipv6_cidr="${2:-}"
+    if [[ -z "$ipv6_cidr" ]]; then
+        ipv6_cidr="${ipv6_addr}/64"
+    fi
     _yellow "Creating IPv6 CNI network..."
 
-    # 计算 /80 子网 (取 IPv6 地址前缀)
+    local subnet_prefix="${CONTAINERD_IPV6_SUBNET_PREFIX:-$DEFAULT_CONTAINERD_IPV6_SUBNET_PREFIX}"
+    local subnet_index="${CONTAINERD_IPV6_SUBNET_INDEX:-$DEFAULT_CONTAINERD_IPV6_SUBNET_INDEX}"
+    if [[ ! "$subnet_prefix" =~ ^[0-9]+$ ]] || (( subnet_prefix < 64 || subnet_prefix > 120 )); then
+        _red "Invalid CONTAINERD_IPV6_SUBNET_PREFIX='${subnet_prefix}', expected an integer from 64 to 120."
+        exit 1
+    fi
+    if [[ ! "$subnet_index" =~ ^[0-9]+$ ]]; then
+        _red "Invalid CONTAINERD_IPV6_SUBNET_INDEX='${subnet_index}', expected a non-negative integer."
+        exit 1
+    fi
+
+    # 从宿主机 IPv6 父网段中切出稳定的 CNI 子网，默认从 /64 切 /80。
     local prefix=""
     if command -v python3 >/dev/null 2>&1; then
-        prefix=$(python3 -c "
-import ipaddress, sys
+        prefix=$(CONTAINERD_IPV6_PARENT="$ipv6_cidr" \
+            CONTAINERD_IPV6_PREFIX="$subnet_prefix" \
+            CONTAINERD_IPV6_INDEX="$subnet_index" \
+            python3 - 2>/dev/null <<'PY' || true
+import ipaddress
+import itertools
+import os
+import sys
+
 try:
-    addr = ipaddress.ip_address('${ipv6_addr}')
-    net = ipaddress.ip_network(str(addr) + '/80', strict=False)
-    print(str(net))
-except Exception as e:
+    parent_raw = os.environ["CONTAINERD_IPV6_PARENT"]
+    requested_prefix = int(os.environ["CONTAINERD_IPV6_PREFIX"])
+    requested_index = int(os.environ["CONTAINERD_IPV6_INDEX"])
+    iface = ipaddress.ip_interface(parent_raw)
+    parent = ipaddress.ip_network(parent_raw, strict=False)
+    if parent.version != 6:
+        raise ValueError("not an IPv6 network")
+    if parent.prefixlen > 64:
+        parent = ipaddress.ip_network(f"{iface.ip}/64", strict=False)
+    new_prefix = max(requested_prefix, parent.prefixlen)
+    if new_prefix > 120:
+        raise ValueError("IPv6 CNI subnet prefix must be <= 120")
+    subnet_count = 1 << (new_prefix - parent.prefixlen)
+    if requested_index >= subnet_count:
+        if requested_index == 1 and subnet_count == 1:
+            requested_index = 0
+        else:
+            raise ValueError("IPv6 subnet index is outside the parent prefix")
+    subnet = next(itertools.islice(parent.subnets(new_prefix=new_prefix), requested_index, None))
+    if subnet is None:
+        raise ValueError("failed to cut IPv6 subnet")
+    print(str(subnet))
+except Exception:
     sys.exit(1)
-" 2>/dev/null || true)
+PY
+)
     fi
     if [[ -z "$prefix" ]]; then
         prefix=$(echo "$ipv6_addr" | awk -F: '{print $1":"$2":"$3":"$4"::/80"}')
     fi
+    if [[ -z "$prefix" ]]; then
+        _red "Failed to calculate IPv6 CNI subnet from ${ipv6_cidr}."
+        exit 1
+    fi
 
+    echo "$ipv6_cidr" > /usr/local/bin/containerd_ipv6_parent
     echo "$prefix" > /usr/local/bin/containerd_ipv6_subnet
 
     cat > /etc/cni/net.d/11-containerd-ipv6.conflist <<EOF
@@ -915,7 +1020,7 @@ start_ndpresponder() {
 
     nerdctl rm -f ndpresponder 2>/dev/null || true
 
-    nerdctl run -d \
+    if nerdctl run -d \
         --restart always \
         --cpus 0.02 \
         --memory 64m \
@@ -925,9 +1030,11 @@ start_ndpresponder() {
         --network host \
         --name ndpresponder \
         "spiritlhl/ndpresponder_${arch_tag}" \
-        -i "${interface}" -N containerd-ipv6 2>/dev/null \
-    && _green "NDP responder started" \
-    || _yellow "ndpresponder start failed; IPv6 may require manual NDP configuration"
+        -i "${interface}" -N containerd-ipv6 2>/dev/null; then
+        _green "NDP responder started"
+    else
+        _yellow "ndpresponder start failed; IPv6 may require manual NDP configuration"
+    fi
 }
 
 # ======== DNS 保活服务 ========
@@ -964,7 +1071,7 @@ RestartSec=30
 [Install]
 WantedBy=multi-user.target
 EOF
-        systemctl daemon-reload
+        systemctl daemon-reload 2>/dev/null || true
         systemctl enable check-dns 2>/dev/null || true
         systemctl start check-dns 2>/dev/null || true
     fi
@@ -1092,9 +1199,9 @@ main() {
         _green "将安装标准 containerd，无容器磁盘大小限制功能"
     fi
 
+    install_base_deps
     detect_interface
     check_ipv6
-    install_base_deps
 
     # 确定存储驱动（含重启后检测，btrfs 安装后需要重启）
     try_storage_drivers
@@ -1125,7 +1232,7 @@ main() {
     setup_dns_check
 
     if [[ "$IPV6_ENABLED" == true ]]; then
-        create_ipv6_network "$IPV6"
+        create_ipv6_network "$IPV6" "${IPV6_CIDR:-${IPV6}/64}"
         adapt_ipv6
         start_ndpresponder
         echo "true" > /usr/local/bin/containerd_ipv6_enabled

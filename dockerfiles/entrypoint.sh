@@ -2,11 +2,11 @@
 # entrypoint.sh - 适用于 bash 系统（Debian/Ubuntu/AlmaLinux/RockyLinux/OpenEuler）
 # from https://github.com/oneclickvirt/containerd
 
-set -e
+set -euo pipefail
 
 # 设置 root 密码（支持通过环境变量传入）
-if [[ -n "$ROOT_PASSWORD" ]]; then
-    echo "root:${ROOT_PASSWORD}" | chpasswd 2>/dev/null || true
+if [[ -n "${ROOT_PASSWORD:-}" ]]; then
+    printf '%s:%s\n' root "$ROOT_PASSWORD" | chpasswd 2>/dev/null || true
 fi
 
 # 修复 sshd_config.d/ 中的覆盖配置
@@ -47,7 +47,10 @@ fi
 
 # 设置 cron 保活 sshd
 cron_line="* * * * * pgrep -x sshd>/dev/null||/usr/sbin/sshd"
-(crontab -l 2>/dev/null | grep -v "sshd"; echo "$cron_line") | crontab - 2>/dev/null || true
+{
+    crontab -l 2>/dev/null | grep -v "sshd" || true
+    printf '%s\n' "$cron_line"
+} | crontab - 2>/dev/null || true
 
 # 前台运行 sshd
 exec /usr/sbin/sshd -D -e

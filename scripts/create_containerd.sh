@@ -15,6 +15,8 @@
 #   CONTAINERD_CONTAINER_SYSTEM=debian - Container system / 容器系统
 #   CONTAINERD_CONTAINER_IPV6=n      - Assign independent IPv6 if available / 可用时分配独立 IPv6
 
+set -euo pipefail
+
 _red()    { echo -e "\033[31m\033[01m$*\033[0m"; }
 _green()  { echo -e "\033[32m\033[01m$*\033[0m"; }
 _yellow() { echo -e "\033[33m\033[01m$*\033[0m"; }
@@ -41,6 +43,7 @@ valid_cpu_value() {
 }
 export DEBIAN_FRONTEND=noninteractive
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+SCRIPT_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DEFAULT_CREATE_COUNT=1
 DEFAULT_CONTAINER_MEMORY=512
@@ -48,6 +51,102 @@ DEFAULT_CONTAINER_CPU=1
 DEFAULT_CONTAINER_DISK=0
 DEFAULT_CONTAINER_SYSTEM="debian"
 DEFAULT_CONTAINER_IPV6="n"
+
+usage() {
+    cat <<'EOF'
+Usage:
+  ./create_containerd.sh [options]
+
+Options:
+  --noninteractive             Use defaults for omitted options
+  -n, --count NUM              Number of containers to create
+  --memory MB                  Memory per container in MB
+  --cpu CPU                    CPU cores per container, e.g. 1 or 0.5
+  --disk GB                    Disk limit in GB, btrfs only, 0=unlimited
+  --system NAME                ubuntu/debian/alpine/almalinux/rockylinux/openeuler
+  --ipv6 y|n                   Assign independent IPv6 if available
+  -h, --help                   Show this help
+EOF
+}
+
+require_option_value() {
+    local opt="$1"
+    local value="${2:-}"
+    if [[ -z "$value" || "$value" == -* ]]; then
+        _red "Missing value for ${opt}"
+        usage
+        exit 1
+    fi
+}
+
+parse_args() {
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --noninteractive)
+                export noninteractive=true
+                shift
+                ;;
+            -n|--count)
+                require_option_value "$1" "${2:-}"
+                CONTAINERD_CREATE_COUNT="$2"
+                shift 2
+                ;;
+            --memory)
+                require_option_value "$1" "${2:-}"
+                CONTAINERD_CONTAINER_MEMORY="$2"
+                shift 2
+                ;;
+            --cpu)
+                require_option_value "$1" "${2:-}"
+                CONTAINERD_CONTAINER_CPU="$2"
+                shift 2
+                ;;
+            --disk)
+                require_option_value "$1" "${2:-}"
+                CONTAINERD_CONTAINER_DISK="$2"
+                shift 2
+                ;;
+            --system)
+                require_option_value "$1" "${2:-}"
+                CONTAINERD_CONTAINER_SYSTEM="$2"
+                shift 2
+                ;;
+            --ipv6)
+                require_option_value "$1" "${2:-}"
+                CONTAINERD_CONTAINER_IPV6="$2"
+                shift 2
+                ;;
+            -h|--help)
+                usage
+                exit 0
+                ;;
+            *)
+                _red "Unknown option: $1"
+                usage
+                exit 1
+                ;;
+        esac
+    done
+}
+
+generate_password() {
+    local password=""
+    if command -v openssl >/dev/null 2>&1; then
+        password=$(openssl rand -hex 16 2>/dev/null || true)
+    fi
+    if [[ -z "$password" ]] && [[ -r /dev/urandom ]] && command -v od >/dev/null 2>&1; then
+        password=$(od -An -N16 -tx1 /dev/urandom 2>/dev/null | tr -d ' \n')
+    fi
+    if [[ -z "$password" ]]; then
+        password=$(printf '%s%s%s' "$(date +%s%N)" "$RANDOM" "$container_num" | md5sum 2>/dev/null | awk '{print substr($1,1,32)}')
+    fi
+    if [[ -z "$password" ]]; then
+        password="${RANDOM}${RANDOM}${RANDOM}${RANDOM}"
+    fi
+    printf '%s\n' "${password:0:32}"
+}
+
+parse_args "$@"
 
 if [ "$(id -u)" != "0" ]; then
     _red "This script must be run as root" 1>&2
@@ -68,12 +167,25 @@ pre_check() {
         fi
     fi
 
-    # 下载 onecontainerd.sh（如果不存在）
-    if [[ ! -f /root/scripts/onecontainerd.sh ]]; then
+    # 优先使用当前仓库中的脚本，避免本地改动调试时落回远端旧版本。
+    if [[ -f "${SCRIPT_SOURCE_DIR}/onecontainerd.sh" ]]; then
         mkdir -p /root/scripts
+        cp "${SCRIPT_SOURCE_DIR}/onecontainerd.sh" /root/scripts/onecontainerd.sh
+        for helper_script in ssh_bash.sh ssh_sh.sh; do
+            if [[ -f "${SCRIPT_SOURCE_DIR}/${helper_script}" ]]; then
+                cp "${SCRIPT_SOURCE_DIR}/${helper_script}" "/root/scripts/${helper_script}"
+                chmod +x "/root/scripts/${helper_script}"
+            fi
+        done
+        chmod +x /root/scripts/onecontainerd.sh
+    elif [[ ! -f /root/scripts/onecontainerd.sh ]]; then
         curl -sL --connect-timeout 10 --max-time 60 \
             "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/containerd/main/scripts/onecontainerd.sh" \
             -o /root/scripts/onecontainerd.sh
+        if [[ ! -s /root/scripts/onecontainerd.sh ]]; then
+            _red "Failed to download onecontainerd.sh"
+            exit 1
+        fi
         chmod +x /root/scripts/onecontainerd.sh
     fi
 }
@@ -90,7 +202,10 @@ cdn_success_url=""
 
 check_cdn() {
     local o_url=$1
-    local shuffled_cdn_urls=($(shuf -e "${cdn_urls[@]}"))
+    local shuffled_cdn_urls=("${cdn_urls[@]}")
+    if command -v shuf >/dev/null 2>&1; then
+        mapfile -t shuffled_cdn_urls < <(printf '%s\n' "${cdn_urls[@]}" | shuf)
+    fi
     for cdn_url in "${shuffled_cdn_urls[@]}"; do
         if curl -4 -sL -k "${cdn_url}${o_url}" --max-time 6 | grep -q "success" >/dev/null 2>&1; then
             export cdn_success_url="$cdn_url"
@@ -131,17 +246,15 @@ check_log() {
         if [[ -n "$last_line" ]]; then
             # 格式: <name> <sshport> <password> <cpu> <memory> <startport> <endport> <disk>
             local last_name last_ssh last_endport
-            last_name=$(echo "$last_line" | awk '{print $1}')
-            last_ssh=$(echo "$last_line" | awk '{print $2}')
-            last_endport=$(echo "$last_line" | awk '{print $7}')
+            read -r last_name last_ssh _ _ _ _ last_endport _ <<< "$last_line"
 
             # 解析容器名前缀和编号（如 ct1 → prefix=ct, num=1）
             if [[ "$last_name" =~ ^([a-zA-Z]+)([0-9]+)$ ]]; then
                 container_prefix="${BASH_REMATCH[1]}"
                 container_num="${BASH_REMATCH[2]}"
             fi
-            [[ -n "$last_ssh" && "$last_ssh" -gt 0 ]] && ssh_port="$last_ssh"
-            [[ -n "$last_endport" && "$last_endport" -gt 0 ]] && public_port_end="$last_endport"
+            [[ "$last_ssh" =~ ^[0-9]+$ && "$last_ssh" -gt 0 ]] && ssh_port="$last_ssh"
+            [[ "$last_endport" =~ ^[0-9]+$ && "$last_endport" -gt 0 ]] && public_port_end="$last_endport"
 
             _blue "Resuming from: prefix=${container_prefix}, num=${container_num}, last_ssh=${ssh_port}, last_endport=${public_port_end}"
         fi
@@ -160,7 +273,7 @@ build_new_containers() {
     else
         reading "需要新增几个容器？ (How many containers to create?) [default: ${DEFAULT_CREATE_COUNT}]: " new_nums
     fi
-    if [[ -z "$new_nums" ]] || ! valid_nonnegative_integer "$new_nums"; then
+    if [[ -z "$new_nums" ]] || ! valid_positive_integer "$new_nums"; then
         _yellow "Invalid container count '${new_nums}', using ${DEFAULT_CREATE_COUNT}"
         new_nums="$DEFAULT_CREATE_COUNT"
     fi
@@ -290,9 +403,8 @@ build_new_containers() {
         public_port_start=$((public_port_end + 1))
         public_port_end=$((public_port_start + 24))
 
-        # 生成随机密码
-        ori=$(date +%s%N | md5sum 2>/dev/null || date | md5sum)
-        passwd="${ori:2:9}"
+        # 生成高熵随机密码，保持十六进制字符以便安全传参和记录。
+        passwd=$(generate_password)
 
         _yellow "[${i}/${new_nums}] Creating container: ${container_name}  ssh:${ssh_port}  ports:${public_port_start}-${public_port_end}"
 

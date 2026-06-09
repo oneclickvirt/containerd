@@ -13,6 +13,8 @@
 #   bash containerduninstall.sh
 #   CONFIRM_UNINSTALL=yes bash containerduninstall.sh
 
+set -euo pipefail
+
 _red()    { echo -e "\033[31m\033[01m$*\033[0m"; }
 _green()  { echo -e "\033[32m\033[01m$*\033[0m"; }
 _yellow() { echo -e "\033[33m\033[01m$*\033[0m"; }
@@ -60,12 +62,12 @@ fi
 _blue "[1/10] 停止并删除所有容器..."
 if command -v nerdctl >/dev/null 2>&1; then
     # 列出所有命名空间
-    namespaces=$(nerdctl namespace ls -q 2>/dev/null || echo "default")
-    for ns in $namespaces; do
-        containers=$(nerdctl -n "$ns" ps -aq 2>/dev/null || true)
-        if [[ -n "$containers" ]]; then
+    mapfile -t namespaces < <(nerdctl namespace ls -q 2>/dev/null || printf 'default\n')
+    for ns in "${namespaces[@]}"; do
+        mapfile -t containers < <(nerdctl -n "$ns" ps -aq 2>/dev/null || true)
+        if [[ "${#containers[@]}" -gt 0 ]]; then
             _yellow "  删除命名空间 ${ns} 中的容器..."
-            nerdctl -n "$ns" rm -f $containers 2>/dev/null || true
+            nerdctl -n "$ns" rm -f "${containers[@]}" 2>/dev/null || true
         fi
     done
     _green "  容器已清理"
@@ -76,11 +78,12 @@ fi
 # ======== 2. 删除所有镜像 ========
 _blue "[2/10] 删除所有容器镜像..."
 if command -v nerdctl >/dev/null 2>&1; then
-    for ns in $(nerdctl namespace ls -q 2>/dev/null || echo "default"); do
-        images=$(nerdctl -n "$ns" images -q 2>/dev/null || true)
-        if [[ -n "$images" ]]; then
+    mapfile -t namespaces < <(nerdctl namespace ls -q 2>/dev/null || printf 'default\n')
+    for ns in "${namespaces[@]}"; do
+        mapfile -t images < <(nerdctl -n "$ns" images -q 2>/dev/null || true)
+        if [[ "${#images[@]}" -gt 0 ]]; then
             _yellow "  删除命名空间 ${ns} 中的镜像..."
-            nerdctl -n "$ns" rmi -f $images 2>/dev/null || true
+            nerdctl -n "$ns" rmi -f "${images[@]}" 2>/dev/null || true
         fi
     done
     _green "  镜像已清理"
@@ -267,6 +270,7 @@ for f in \
     /usr/local/bin/containerd_arch \
     /usr/local/bin/containerd_cdn \
     /usr/local/bin/containerd_ipv6_enabled \
+    /usr/local/bin/containerd_ipv6_parent \
     /usr/local/bin/containerd_ipv6_subnet \
     /usr/local/bin/containerd_main_interface \
     /usr/local/bin/containerd_firewall_backend \

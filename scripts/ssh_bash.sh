@@ -5,8 +5,11 @@
 
 # 容器内 SSH 初始化脚本（适用于 bash 系统：Debian/Ubuntu/AlmaLinux/RockyLinux/OpenEuler）
 
+set -euo pipefail
+
 REGEX=("debian" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora" "arch" "alpine")
 RELEASE=("Debian" "Ubuntu" "CentOS" "CentOS" "Fedora" "Arch" "Alpine")
+# shellcheck disable=SC2034
 PACKAGE_UPDATE=(
     "! apt-get update && apt-get --fix-broken install -y && apt-get update"
     "apt-get update"
@@ -27,14 +30,15 @@ PACKAGE_INSTALL=(
 )
 
 CMD=(
-    "$(grep -i pretty_name /etc/os-release 2>/dev/null | cut -d \" -f2)"
-    "$(hostnamectl 2>/dev/null | grep -i system | cut -d : -f2)"
-    "$(lsb_release -sd 2>/dev/null)"
-    "$(grep -i description /etc/lsb-release 2>/dev/null | cut -d \" -f2)"
-    "$(grep . /etc/redhat-release 2>/dev/null)"
-    "$(grep . /etc/issue 2>/dev/null | cut -d \\ -f1 | sed '/^[ ]*$/d')"
-    "$(grep . /etc/alpine-release 2>/dev/null)"
+    "$(grep -i pretty_name /etc/os-release 2>/dev/null | cut -d \" -f2 || true)"
+    "$(hostnamectl 2>/dev/null | grep -i system | cut -d : -f2 || true)"
+    "$(lsb_release -sd 2>/dev/null || true)"
+    "$(grep -i description /etc/lsb-release 2>/dev/null | cut -d \" -f2 || true)"
+    "$(grep . /etc/redhat-release 2>/dev/null || true)"
+    "$(grep . /etc/issue 2>/dev/null | cut -d \\ -f1 | sed '/^[ ]*$/d' || true)"
+    "$(grep . /etc/alpine-release 2>/dev/null || true)"
 )
+SYSTEM=""
 SYS="${CMD[0]}"
 [[ -n $SYS ]] || SYS="${CMD[1]}"
 [[ -n $SYS ]] || SYS="${CMD[2]}"
@@ -48,6 +52,10 @@ for ((int = 0; int < ${#REGEX[@]}; int++)); do
         [[ -n $SYSTEM ]] && break
     fi
 done
+if [[ -z "$SYSTEM" ]]; then
+    echo "ERROR: The script does not support the current system!"
+    exit 1
+fi
 
 # ======== 安装必要模块 ========
 install_required_modules() {
@@ -145,7 +153,10 @@ start_sshd() {
 # ======== 设置自启动 cron 任务确保 sshd 存活 ========
 setup_cron_sshd() {
     local cron_line="* * * * * pgrep -x sshd>/dev/null||/usr/sbin/sshd"
-    (crontab -l 2>/dev/null | grep -v "sshd"; echo "$cron_line") | crontab - 2>/dev/null || true
+    {
+        crontab -l 2>/dev/null | grep -v "sshd" || true
+        printf '%s\n' "$cron_line"
+    } | crontab - 2>/dev/null || true
     if command -v crond >/dev/null 2>&1; then
         crond 2>/dev/null || true
     elif command -v cron >/dev/null 2>&1; then
@@ -154,7 +165,11 @@ setup_cron_sshd() {
 }
 
 # ======== 主流程 ========
-passwd_input="${1:-123456}"
+passwd_input="${1:-}"
+if [ -z "$passwd_input" ]; then
+    echo "Root password argument is required."
+    exit 1
+fi
 
 install_required_modules
 update_motd
@@ -163,8 +178,8 @@ fix_cloud_init
 update_sshd_config
 
 # 设置 root 密码
-echo "root:${passwd_input}" | chpasswd 2>/dev/null || \
-    echo "root:${passwd_input}" | sudo chpasswd 2>/dev/null || true
+printf '%s:%s\n' root "$passwd_input" | chpasswd 2>/dev/null || \
+    printf '%s:%s\n' root "$passwd_input" | sudo chpasswd 2>/dev/null || true
 
 start_sshd
 setup_cron_sshd

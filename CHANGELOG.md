@@ -1,3 +1,15 @@
+2026.06.03
+- CI/CD 基线补强：GitHub Actions 增加 `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24`、job 超时、并发控制，升级 `docker/build-push-action` 到 v6，并改用 `gh` CLI 上传 Releases 资产以移除旧版上传 action
+- CI 增加 Ubuntu/Debian/Alpine 容器内非交互 smoke test，覆盖安装、卸载、批量创建、单容器和管理脚本的语法与 help 入口
+- 安全忽略规则补强：新增 `.env`、数据库文件、密钥文件、截图、ctlog 和容器信息文件等运行产物忽略
+- 批量创建增强：`create_containerd.sh` 新增命令行参数模式，并将默认批量密码从时间 md5 片段升级为高熵随机密码
+- 镜像管理调整：`onecontainerd.sh` 改为优先拉取 GHCR/自定义镜像仓库的多架构标签，兼容旧 GHCR 标签，失败后回退到 GitHub Releases 离线包
+- 容器创建前增加容器名、参数、端口范围和宿主机端口占用预检，减少运行后失败和端口重复映射
+- 安装脚本新增 `CONTAINERD_MAIN_INTERFACE` 指定宿主机出口网卡，并将 IPv6 CNI 子网改为从父前缀稳定切分，支持 `CONTAINERD_IPV6_SUBNET_PREFIX` 和 `CONTAINERD_IPV6_SUBNET_INDEX`
+- 新增 `scripts/containerd_manage.sh`，支持容器资源快照查询、镜像快照、容器文件系统备份和镜像版本/远端资产检查
+- 安装、批量创建、单容器创建、SSH bash 初始化、Docker entrypoint 与卸载脚本启用 Bash 严格模式，Alpine sh 脚本启用 POSIX `set -eu`，并为最小系统缺少 `shuf`、公网 IP 探测失败、systemd/nftables 尽力配置等路径增加显式降级
+- 移除镜像和 SSH 初始化脚本中的 `123456` 默认密码，直接创建容器省略密码时改为自动生成随机密码
+
 2026.06.02
 - 统一无交互入口：安装、批量创建、卸载脚本均支持 `export noninteractive=true`，并在无交互模式下使用清晰默认值避免 stdin 阻塞
 - 批量创建脚本新增环境变量覆盖：`CONTAINERD_CREATE_COUNT`、`CONTAINERD_CONTAINER_MEMORY`、`CONTAINERD_CONTAINER_CPU`、`CONTAINERD_CONTAINER_DISK`、`CONTAINERD_CONTAINER_SYSTEM`、`CONTAINERD_CONTAINER_IPV6`

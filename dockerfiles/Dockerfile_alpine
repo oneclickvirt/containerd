@@ -1,6 +1,6 @@
 FROM alpine:latest
 
-ENV ROOT_PASSWORD=123456 \
+ENV ROOT_PASSWORD="" \
     IPV6_ENABLED=false
 
 RUN apk update && \
