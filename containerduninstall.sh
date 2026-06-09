@@ -13,23 +13,23 @@
 #   bash containerduninstall.sh
 #   CONFIRM_UNINSTALL=yes bash containerduninstall.sh
 
-set -euo pipefail
+set -uo pipefail
 
 _red()    { echo -e "\033[31m\033[01m$*\033[0m"; }
 _green()  { echo -e "\033[32m\033[01m$*\033[0m"; }
 _yellow() { echo -e "\033[33m\033[01m$*\033[0m"; }
 _blue()   { echo -e "\033[36m\033[01m$*\033[0m"; }
-is_noninteractive() {
-    case "$(printf '%s' "${noninteractive:-}" | tr '[:upper:]' '[:lower:]')" in
-        true|yes|y|1) return 0 ;;
+is_truthy() {
+    case "${1:-}" in
+        [Tt][Rr][Uu][Ee]|1|[Yy][Ee][Ss]|[Yy]) return 0 ;;
         *) return 1 ;;
     esac
 }
+is_noninteractive() {
+    is_truthy "${noninteractive:-${NONINTERACTIVE:-}}"
+}
 is_yes() {
-    case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
-        y|yes|true|1) return 0 ;;
-        *) return 1 ;;
-    esac
+    is_truthy "$1"
 }
 
 if [ "$(id -u)" != "0" ]; then

@@ -3,7 +3,7 @@
 # https://github.com/oneclickvirt/containerd
 # 2026.06.03
 
-set -euo pipefail
+set -uo pipefail
 
 _red() { echo -e "\033[31m\033[01m$*\033[0m"; }
 _green() { echo -e "\033[32m\033[01m$*\033[0m"; }

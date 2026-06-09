@@ -296,43 +296,59 @@ get_arch() {
     echo "$ARCH_TYPE"
 }
 
+get_platform() {
+    case "$(get_arch)" in
+        amd64) echo "linux/amd64" ;;
+        arm64) echo "linux/arm64" ;;
+        arm)   echo "linux/arm/v7" ;;
+        *)     echo "linux/amd64" ;;
+    esac
+}
+
+image_ref_exists() {
+    local img="$1"
+    nerdctl image inspect "$img" >/dev/null 2>&1 || \
+        nerdctl image inspect "docker.io/$img" >/dev/null 2>&1
+}
+
+load_image_archive() {
+    local tar_path="$1"
+    local platform="$2"
+
+    # nerdctl/containerd 2.x may fail multi-platform imports without an explicit platform:
+    # "unable to initialize unpacker: no unpack platforms defined".
+    if nerdctl load --platform="$platform" --input="$tar_path"; then
+        return 0
+    fi
+
+    _yellow "nerdctl load failed, trying ctr import with --local and explicit platform..."
+    if command -v ctr >/dev/null 2>&1 && ctr images import --local --platform "$platform" "$tar_path"; then
+        return 0
+    fi
+
+    return 1
+}
+
 download_and_load_image() {
     local system_type="$1"
     local arch
     arch=$(get_arch)
+    local platform
+    platform=$(get_platform)
     local tar_filename="spiritlhl_${system_type}_${arch}.tar.gz"
     # 本仓库 tar 包加载后的标准镜像名（docker.io/spiritlhl/<sys>:latest）
     local canonical_image="spiritlhl/${system_type}:latest"
-    local image_registry="${CONTAINERD_IMAGE_REGISTRY:-ghcr.io/oneclickvirt/containerd}"
-    local primary_image="${image_registry}:${system_type}"
-    local arch_image="${image_registry}:${system_type}-${arch}"
-    local legacy_image="ghcr.io/oneclickvirt/${system_type}:latest"
+    # 默认优先使用 GitHub Releases 离线包。公开仓库当前没有 GHCR Packages，
+    # 只有显式设置 CONTAINERD_IMAGE_REGISTRY 时才先尝试 registry。
+    local image_registry="${CONTAINERD_IMAGE_REGISTRY:-}"
     local release_base="${CONTAINERD_IMAGE_RELEASE_BASE:-https://github.com/oneclickvirt/containerd/releases/download}"
 
     # 检查镜像是否已存在
-    if nerdctl image inspect "${canonical_image}" >/dev/null 2>&1 || \
-       nerdctl image inspect "docker.io/${canonical_image}" >/dev/null 2>&1; then
+    if image_ref_exists "${canonical_image}"; then
         _green "Image ${canonical_image} already exists, skipping download"
         export image_name="${canonical_image}"
         return 0
     fi
-
-    # 优先从 GHCR/自定义镜像仓库拉取多架构标签；兼容旧的按系统仓库和按架构标签。
-    local pull_candidates=("$primary_image" "$arch_image")
-    if [[ "$image_registry" == "ghcr.io/oneclickvirt/containerd" ]]; then
-        pull_candidates+=("$legacy_image")
-    fi
-    local remote_image
-    for remote_image in "${pull_candidates[@]}"; do
-        _yellow "Trying to pull image: $remote_image"
-        if nerdctl pull "$remote_image"; then
-            nerdctl tag "$remote_image" "${canonical_image}" 2>/dev/null || true
-            export image_name="${canonical_image}"
-            _green "Image pulled: ${remote_image}"
-            return 0
-        fi
-    done
-    _yellow "Image pull failed, falling back to release tarball..."
 
     local release_url="${release_base%/}/${system_type}/${tar_filename}"
     local download_url="$release_url"
@@ -344,8 +360,14 @@ download_and_load_image() {
     if curl -L --connect-timeout 15 --max-time 600 -o "/tmp/${tar_filename}" "$download_url" && \
        [[ -f "/tmp/${tar_filename}" ]] && [[ -s "/tmp/${tar_filename}" ]]; then
         _yellow "Loading image from tar..."
-        if nerdctl load < "/tmp/${tar_filename}"; then
+        if load_image_archive "/tmp/${tar_filename}" "$platform"; then
             rm -f "/tmp/${tar_filename}"
+            # 确保最终使用统一镜像名。不同 nerdctl 版本可能保存为 docker.io/spiritlhl/...
+            if image_ref_exists "${canonical_image}"; then
+                :
+            elif image_ref_exists "docker.io/${canonical_image}"; then
+                nerdctl tag "docker.io/${canonical_image}" "${canonical_image}" 2>/dev/null || true
+            fi
             export image_name="${canonical_image}"
             _green "Image loaded: ${image_name}"
             return 0
@@ -356,6 +378,23 @@ download_and_load_image() {
     else
         _yellow "CDN/direct download failed for ${download_url}"
         rm -f "/tmp/${tar_filename}" 2>/dev/null
+    fi
+
+    # Registry 回退只在显式指定 CONTAINERD_IMAGE_REGISTRY 时启用，避免默认 GHCR 403/404 拖慢并误导。
+    if [[ -n "$image_registry" ]]; then
+        local primary_image="${image_registry}:${system_type}"
+        local arch_image="${image_registry}:${system_type}-${arch}"
+        local pull_candidates=("$primary_image" "$arch_image")
+        local remote_image
+        for remote_image in "${pull_candidates[@]}"; do
+            _yellow "Trying to pull image: $remote_image"
+            if nerdctl pull --platform="$platform" "$remote_image"; then
+                nerdctl tag "$remote_image" "${canonical_image}" 2>/dev/null || true
+                export image_name="${canonical_image}"
+                _green "Image pulled: ${remote_image}"
+                return 0
+            fi
+        done
     fi
 
     _red "Failed to obtain image for ${system_type}"

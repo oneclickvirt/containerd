@@ -15,24 +15,27 @@
 #   CONTAINERD_CONTAINER_SYSTEM=debian - Container system / 容器系统
 #   CONTAINERD_CONTAINER_IPV6=n      - Assign independent IPv6 if available / 可用时分配独立 IPv6
 
-set -euo pipefail
+set -uo pipefail
 
 _red()    { echo -e "\033[31m\033[01m$*\033[0m"; }
 _green()  { echo -e "\033[32m\033[01m$*\033[0m"; }
 _yellow() { echo -e "\033[33m\033[01m$*\033[0m"; }
 _blue()   { echo -e "\033[36m\033[01m$*\033[0m"; }
-reading() { read -rp "$(_green "$1")" "$2"; }
-is_noninteractive() {
-    case "$(printf '%s' "${noninteractive:-}" | tr '[:upper:]' '[:lower:]')" in
-        true|yes|y|1) return 0 ;;
+is_truthy() {
+    case "${1:-}" in
+        [Tt][Rr][Uu][Ee]|1|[Yy][Ee][Ss]|[Yy]) return 0 ;;
         *) return 1 ;;
     esac
 }
+is_noninteractive() {
+    is_truthy "${noninteractive:-${NONINTERACTIVE:-}}"
+}
+reading() {
+    is_noninteractive && return 1
+    read -rp "$(_green "$1")" "$2"
+}
 is_yes() {
-    case "$(printf '%s' "$1" | tr '[:upper:]' '[:lower:]')" in
-        y|yes|true|1) return 0 ;;
-        *) return 1 ;;
-    esac
+    is_truthy "$1"
 }
 valid_nonnegative_integer() { [[ "$1" =~ ^[0-9]+$ ]]; }
 valid_positive_integer() { [[ "$1" =~ ^[1-9][0-9]*$ ]]; }
