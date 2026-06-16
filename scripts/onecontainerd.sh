@@ -30,7 +30,7 @@ sshport="${5:-25000}"
 startport="${6:-34975}"
 endport="${7:-35000}"
 independent_ipv6="${8:-N}"
-system=$(printf '%s' "${9:-debian}" | tr '[:upper:]' '[:lower:]')
+system="${9:-debian}"
 disk="${10:-0}"
 
 generate_password() {
@@ -56,6 +56,38 @@ valid_cpu_value() {
     [[ "$1" =~ ^([0-9]+([.][0-9]+)?|[.][0-9]+)$ ]] || return 1
     [[ "$1" =~ ^0*([.]0*)?$ ]] && return 1
     return 0
+}
+print_supported_container_systems() {
+    _yellow "Supported system values: ubuntu / debian / alpine / almalinux / rockylinux / openeuler"
+    _yellow "Supported version aliases: ubuntu22, ubuntu22.04, ubuntu/22.04, debian12, debian/12, alpine/latest, almalinux9, alma9, rockylinux9, rocky9, openeuler22.03, openeuler/22.03"
+}
+normalize_container_system() {
+    local raw="${1:-}"
+    local compact
+    compact=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]' | sed -E 's#[/:._-]##g')
+    case "$compact" in
+        ubuntu|ubuntu22|ubuntu2204)
+            printf 'ubuntu\n'
+            ;;
+        debian|debian12)
+            printf 'debian\n'
+            ;;
+        alpine|alpinelatest)
+            printf 'alpine\n'
+            ;;
+        almalinux|almalinux9|alma|alma9)
+            printf 'almalinux\n'
+            ;;
+        rockylinux|rockylinux9|rocky|rocky9)
+            printf 'rockylinux\n'
+            ;;
+        openeuler|openeuler22|openeuler2203)
+            printf 'openeuler\n'
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 valid_port() {
     [[ "$1" =~ ^[0-9]+$ ]] || return 1
@@ -99,10 +131,17 @@ validate_inputs() {
         _red "Invalid port mapping: sshport (${sshport}) overlaps the public port range (${startport}-${endport})."
         exit 1
     fi
-    if [[ ! "$system" =~ ^(ubuntu|debian|alpine|almalinux|rockylinux|openeuler)$ ]]; then
-        _red "Unsupported container system '${system}'."
+    local requested_system="$system"
+    local normalized_system
+    if ! normalized_system=$(normalize_container_system "$requested_system"); then
+        _red "Unsupported container system '${requested_system}'."
+        print_supported_container_systems
         exit 1
     fi
+    if [[ "$(printf '%s' "$requested_system" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" != "$normalized_system" ]]; then
+        _blue "Normalized container system '${requested_system}' to '${normalized_system}'"
+    fi
+    system="$normalized_system"
     if ! valid_nonnegative_integer "$disk"; then
         _red "Invalid disk limit '${disk}'. Expected a non-negative integer in GB."
         exit 1

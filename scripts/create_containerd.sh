@@ -44,6 +44,38 @@ valid_cpu_value() {
     [[ "$1" =~ ^0*([.]0*)?$ ]] && return 1
     return 0
 }
+print_supported_container_systems() {
+    _yellow "Supported system values: ubuntu / debian / alpine / almalinux / rockylinux / openeuler"
+    _yellow "Supported version aliases: ubuntu22, ubuntu22.04, ubuntu/22.04, debian12, debian/12, alpine/latest, almalinux9, alma9, rockylinux9, rocky9, openeuler22.03, openeuler/22.03"
+}
+normalize_container_system() {
+    local raw="${1:-}"
+    local compact
+    compact=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]' | sed -E 's#[/:._-]##g')
+    case "$compact" in
+        ubuntu|ubuntu22|ubuntu2204)
+            printf 'ubuntu\n'
+            ;;
+        debian|debian12)
+            printf 'debian\n'
+            ;;
+        alpine|alpinelatest)
+            printf 'alpine\n'
+            ;;
+        almalinux|almalinux9|alma|alma9)
+            printf 'almalinux\n'
+            ;;
+        rockylinux|rockylinux9|rocky|rocky9)
+            printf 'rockylinux\n'
+            ;;
+        openeuler|openeuler22|openeuler2203)
+            printf 'openeuler\n'
+            ;;
+        *)
+            return 1
+            ;;
+    esac
+}
 export DEBIAN_FRONTEND=noninteractive
 export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
 SCRIPT_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -66,7 +98,7 @@ Options:
   --memory MB                  Memory per container in MB
   --cpu CPU                    CPU cores per container, e.g. 1 or 0.5
   --disk GB                    Disk limit in GB, btrfs only, 0=unlimited
-  --system NAME                ubuntu/debian/alpine/almalinux/rockylinux/openeuler
+  --system NAME                ubuntu/debian/alpine/almalinux/rockylinux/openeuler or supported version alias
   --ipv6 y|n                   Assign independent IPv6 if available
   -h, --help                   Show this help
 EOF
@@ -339,6 +371,7 @@ build_new_containers() {
 
     # 询问系统
     _blue "可选系统: ubuntu / debian / alpine / almalinux / rockylinux / openeuler"
+    _blue "可选版本别名: ubuntu22.04 / debian12 / alpine/latest / almalinux9 / rockylinux9 / openeuler22.03"
     if [[ -n "${CONTAINERD_CONTAINER_SYSTEM:-}" ]]; then
         system_type="${CONTAINERD_CONTAINER_SYSTEM}"
         _blue "[non-interactive] CONTAINERD_CONTAINER_SYSTEM=${CONTAINERD_CONTAINER_SYSTEM}"
@@ -349,12 +382,17 @@ build_new_containers() {
         reading "选择系统 (Choose system) [default: ${DEFAULT_CONTAINER_SYSTEM}]: " system_type
     fi
     [[ -z "$system_type" ]] && system_type="$DEFAULT_CONTAINER_SYSTEM"
-    system_type=$(echo "$system_type" | tr '[:upper:]' '[:lower:]')
-    # 验证
-    if [[ ! "$system_type" =~ ^(ubuntu|debian|alpine|almalinux|rockylinux|openeuler)$ ]]; then
-        _yellow "Unknown system '${system_type}', using ${DEFAULT_CONTAINER_SYSTEM}"
-        system_type="$DEFAULT_CONTAINER_SYSTEM"
+    local requested_system_type="$system_type"
+    local normalized_system_type
+    if ! normalized_system_type=$(normalize_container_system "$requested_system_type"); then
+        _red "Unsupported container system '${requested_system_type}'."
+        print_supported_container_systems
+        exit 1
     fi
+    if [[ "$(printf '%s' "$requested_system_type" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" != "$normalized_system_type" ]]; then
+        _blue "Normalized container system '${requested_system_type}' to '${normalized_system_type}'"
+    fi
+    system_type="$normalized_system_type"
 
     # 询问是否附加独立 IPv6
     IPV6_AVAILABLE=false

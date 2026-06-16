@@ -81,10 +81,23 @@ chmod +x onecontainerd.sh
 | startport | 公网端口范围起始 | 34975 |
 | endport | 公网端口范围结束 | 35000 |
 | ipv6 | 是否分配独立 IPv6（y/n） | n |
-| system | 镜像系统 | debian |
+| system | 镜像系统，支持裸系统名或本仓库已构建版本别名 | debian |
 | disk_gb | 磁盘限制 GB（0=不限制） | 0 |
 
 **支持的 system 参数：** `ubuntu` / `debian` / `alpine` / `almalinux` / `rockylinux` / `openeuler`
+
+也支持带版本的常见写法，并会自动归一化到本仓库实际镜像标签：
+
+| 实际镜像 | 支持输入示例 |
+|----------|--------------|
+| `ubuntu` | `ubuntu22` / `ubuntu22.04` / `ubuntu/22.04` |
+| `debian` | `debian12` / `debian/12` |
+| `alpine` | `alpine/latest` |
+| `almalinux` | `almalinux9` / `alma9` |
+| `rockylinux` | `rockylinux9` / `rocky9` |
+| `openeuler` | `openeuler22.03` / `openeuler/22.03` |
+
+未列出的版本（例如 `debian11`、`centos7`）没有对应的本仓库镜像，脚本会直接报错并提示可用值，避免创建错误系统或后续下载不存在的镜像。
 
 单容器创建镜像源变量：
 

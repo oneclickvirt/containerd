@@ -1,3 +1,6 @@
+2026.06.15
+- 系统参数兼容性补强：单容器、批量创建和 `version-check` 统一支持 `debian12`、`debian/12`、`ubuntu22.04` 等版本别名，未知版本改为明确报错并提示可用值，避免静默回退或下载不存在镜像。
+
 2026.06.03
 - CI/CD 基线补强：GitHub Actions 增加 `FORCE_JAVASCRIPT_ACTIONS_TO_NODE24`、job 超时、并发控制，升级 `docker/build-push-action` 到 v6，并改用 `gh` CLI 上传 Releases 资产以移除旧版上传 action
 - CI 增加 Ubuntu/Debian/Alpine 容器内非交互 smoke test，覆盖安装、卸载、批量创建、单容器和管理脚本的语法与 help 入口

@@ -40,8 +40,38 @@ valid_container_name() {
     [[ "$1" =~ ^[a-zA-Z][a-zA-Z0-9_.-]*$ ]]
 }
 
-valid_system() {
-    [[ "$1" =~ ^(ubuntu|debian|alpine|almalinux|rockylinux|openeuler)$ ]]
+print_supported_container_systems() {
+    _yellow "Supported system values: ubuntu / debian / alpine / almalinux / rockylinux / openeuler"
+    _yellow "Supported version aliases: ubuntu22, ubuntu22.04, ubuntu/22.04, debian12, debian/12, alpine/latest, almalinux9, alma9, rockylinux9, rocky9, openeuler22.03, openeuler/22.03"
+}
+
+normalize_container_system() {
+    local raw="${1:-}"
+    local compact
+    compact=$(printf '%s' "$raw" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]' | sed -E 's#[/:._-]##g')
+    case "$compact" in
+        ubuntu|ubuntu22|ubuntu2204)
+            printf 'ubuntu\n'
+            ;;
+        debian|debian12)
+            printf 'debian\n'
+            ;;
+        alpine|alpinelatest)
+            printf 'alpine\n'
+            ;;
+        almalinux|almalinux9|alma|alma9)
+            printf 'almalinux\n'
+            ;;
+        rockylinux|rockylinux9|rocky|rocky9)
+            printf 'rockylinux\n'
+            ;;
+        openeuler|openeuler22|openeuler2203)
+            printf 'openeuler\n'
+            ;;
+        *)
+            return 1
+            ;;
+    esac
 }
 
 detect_arch() {
@@ -140,11 +170,15 @@ release_asset_updated_at() {
 }
 
 cmd_version_check() {
-    local system="${1:-debian}"
-    system=$(printf '%s' "$system" | tr '[:upper:]' '[:lower:]')
-    if ! valid_system "$system"; then
-        _red "Unsupported system '${system}'."
+    local requested_system="${1:-debian}"
+    local system
+    if ! system=$(normalize_container_system "$requested_system"); then
+        _red "Unsupported system '${requested_system}'."
+        print_supported_container_systems
         exit 1
+    fi
+    if [[ "$(printf '%s' "$requested_system" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" != "$system" ]]; then
+        _blue "Normalized system '${requested_system}' to '${system}'"
     fi
 
     local arch
