@@ -303,6 +303,23 @@ jobs:
               chmod +x "$tmpbin/nerdctl"
               cat > "$tmpbin/curl" <<'"'"'FAKECURL'"'"'
           #!/bin/sh
+          output=""
+          while [ "$#" -gt 0 ]; do
+            case "$1" in
+              -o|--output)
+                shift
+                output="${1:-}"
+                ;;
+              --output=*)
+                output="${1#--output=}"
+                ;;
+            esac
+            shift || break
+          done
+          if [ -n "$output" ]; then
+            printf "%s\n" "fake-download" > "$output"
+            exit 0
+          fi
           printf "%s\n" "127.0.0.1"
           exit 0
           FAKECURL

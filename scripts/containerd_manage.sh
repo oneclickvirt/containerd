@@ -184,24 +184,38 @@ cmd_version_check() {
     local arch
     arch=$(detect_arch)
     local canonical_image="spiritlhl/${system}:latest"
-    local image_registry="${CONTAINERD_IMAGE_REGISTRY:-ghcr.io/oneclickvirt/containerd}"
-    local remote_image="${image_registry}:${system}"
-    local arch_image="${image_registry}:${system}-${arch}"
+    local image_registry="${CONTAINERD_IMAGE_REGISTRY:-}"
+    local remote_image=""
+    local arch_image=""
     local legacy_image="ghcr.io/oneclickvirt/${system}:latest"
     local release_base="${CONTAINERD_IMAGE_RELEASE_BASE:-https://github.com/oneclickvirt/containerd/releases/download}"
     local tar_filename="spiritlhl_${system}_${arch}.tar.gz"
     local release_url="${release_base%/}/${system}/${tar_filename}"
+    if [[ -n "$image_registry" ]]; then
+        remote_image="${image_registry}:${system}"
+        arch_image="${image_registry}:${system}-${arch}"
+    fi
 
     _blue "System: ${system}  arch: ${arch}"
-    _blue "Preferred image: ${remote_image}"
-    _blue "Compatible image tags: ${arch_image}, ${legacy_image}"
+    _blue "Primary release asset: ${release_url}"
     _blue "Canonical local image: ${canonical_image}"
+    _blue "Legacy local image tag: ${legacy_image}"
+    if [[ -n "$remote_image" ]]; then
+        _blue "Configured registry fallback: ${remote_image}"
+        _blue "Compatible registry fallback tag: ${arch_image}"
+    else
+        _blue "Registry fallback: disabled (set CONTAINERD_IMAGE_REGISTRY to enable)"
+    fi
 
     if command -v nerdctl >/dev/null 2>&1 || [[ -x /usr/local/bin/nerdctl ]]; then
         local local_lines
-        local_lines=$(local_image_lines "$canonical_image" "$remote_image")
-        if [[ -z "$local_lines" ]]; then
-            local_lines=$(local_image_lines "$arch_image" "$legacy_image")
+        local_lines=$(local_image_lines "$canonical_image" "$legacy_image")
+        if [[ -n "$remote_image" ]]; then
+            local configured_lines
+            configured_lines=$(local_image_lines "$remote_image" "$arch_image")
+            if [[ -n "$configured_lines" ]]; then
+                local_lines=$(printf '%s\n%s\n' "$local_lines" "$configured_lines" | awk 'NF && !seen[$0]++')
+            fi
         fi
         if [[ -n "$local_lines" ]]; then
             _green "Local image found:"

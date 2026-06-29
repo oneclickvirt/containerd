@@ -1,3 +1,6 @@
+2026.06.29
+- 修复 CI 非交互 smoke test 的 fake `curl` 未模拟 `-o` 下载产物导致单容器创建提前失败的问题；同步 README 和 `version-check` 中默认镜像来源说明，明确当前默认使用 Releases 离线包，`CONTAINERD_IMAGE_REGISTRY` 仅在显式配置时作为回退 registry。
+
 2026.06.15
 - 系统参数兼容性补强：单容器、批量创建和 `version-check` 统一支持 `debian12`、`debian/12`、`ubuntu22.04` 等版本别名，未知版本改为明确报错并提示可用值，避免静默回退或下载不存在镜像。
 

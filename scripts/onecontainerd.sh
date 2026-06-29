@@ -507,7 +507,7 @@ download_and_load_image() {
     # 本仓库 tar 包加载后的标准镜像名（docker.io/spiritlhl/<sys>:latest）
     local canonical_image="spiritlhl/${system_type}:latest"
     # 默认优先使用 GitHub Releases 离线包。公开仓库当前没有 GHCR Packages，
-    # 只有显式设置 CONTAINERD_IMAGE_REGISTRY 时才先尝试 registry。
+    # 只有显式设置 CONTAINERD_IMAGE_REGISTRY 时才启用 registry 回退。
     local image_registry="${CONTAINERD_IMAGE_REGISTRY:-}"
     local release_base="${CONTAINERD_IMAGE_RELEASE_BASE:-https://github.com/oneclickvirt/containerd/releases/download}"
 

@@ -9,7 +9,7 @@
 ## 说明
 
 - 使用 [nerdctl-full](https://github.com/containerd/nerdctl) 安装 containerd + runc + nerdctl + CNI + buildkitd 全套组件
-- 使用本仓库自编译的基础镜像，优先从 GHCR 拉取，失败时回退到 GitHub Releases 离线包
+- 使用本仓库自编译的基础镜像，默认从 GitHub Releases 离线包加载；如配置 `CONTAINERD_IMAGE_REGISTRY`，则在离线包不可用时回退尝试该 registry
 - 支持系统：Ubuntu 22.04、Debian 12、Alpine、AlmaLinux 9、RockyLinux 9、OpenEuler 22.03
 - 支持架构：amd64、arm64
 
@@ -103,7 +103,7 @@ chmod +x onecontainerd.sh
 
 | 变量 | 说明 | 默认值 |
 |------|------|--------|
-| CONTAINERD_IMAGE_REGISTRY | 优先拉取的镜像仓库，脚本会拉取 `<registry>:<system>` 多架构标签 | ghcr.io/oneclickvirt/containerd |
+| CONTAINERD_IMAGE_REGISTRY | 可选回退镜像仓库；设置后脚本会在 Releases 下载失败时拉取 `<registry>:<system>` 和 `<registry>:<system>-<arch>` | unset |
 | CONTAINERD_IMAGE_RELEASE_BASE | Releases 离线包基础地址 | https://github.com/oneclickvirt/containerd/releases/download |
 
 ## 批量开设容器
