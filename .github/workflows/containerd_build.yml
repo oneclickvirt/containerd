@@ -229,7 +229,7 @@ jobs:
             --clobber
 
       - name: Push multi-arch image to GHCR
-        uses: docker/build-push-action@v6
+        uses: docker/build-push-action@v7
         with:
           context: dockerfiles/
           file: dockerfiles/${{ matrix.dockerfile }}
