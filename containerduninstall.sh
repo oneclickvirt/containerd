@@ -1,7 +1,7 @@
 #!/bin/bash
 # from
 # https://github.com/oneclickvirt/containerd
-# 2026.03.01
+# 2026.08.26
 # 完整卸载 containerd 环境及所有容器
 #
 # Supported environment variables (non-interactive mode / 支持的环境变量，可实现无交互卸载):
@@ -142,6 +142,9 @@ if command -v iptables >/dev/null 2>&1; then
     iptables -t nat -D POSTROUTING -s 172.20.0.0/16 ! -d 172.20.0.0/16 -j MASQUERADE 2>/dev/null || true
     iptables -D FORWARD -s 172.20.0.0/16 -j ACCEPT 2>/dev/null || true
     iptables -D FORWARD -d 172.20.0.0/16 -j ACCEPT 2>/dev/null || true
+    iptables -t nat -D POSTROUTING -s 172.21.0.0/16 ! -d 172.21.0.0/16 -j MASQUERADE 2>/dev/null || true
+    iptables -D FORWARD -s 172.21.0.0/16 -j ACCEPT 2>/dev/null || true
+    iptables -D FORWARD -d 172.21.0.0/16 -j ACCEPT 2>/dev/null || true
     _yellow "  IPv4 iptables 规则已清理"
 fi
 if command -v ip6tables >/dev/null 2>&1; then
@@ -151,6 +154,7 @@ if command -v ip6tables >/dev/null 2>&1; then
         ipv6_subnet=$(cat /usr/local/bin/containerd_ipv6_subnet)
         ip6tables -D FORWARD -s "${ipv6_subnet}" -j ACCEPT 2>/dev/null || true
         ip6tables -D FORWARD -d "${ipv6_subnet}" -j ACCEPT 2>/dev/null || true
+        ip6tables -t nat -D POSTROUTING -s "${ipv6_subnet}" ! -d "${ipv6_subnet}" -j MASQUERADE 2>/dev/null || true
     fi
     _yellow "  IPv6 ip6tables 规则已清理"
 fi
@@ -274,6 +278,8 @@ for f in \
     /usr/local/bin/containerd_check_ipv6_cidr \
     /usr/local/bin/containerd_ipv6_parent \
     /usr/local/bin/containerd_ipv6_subnet \
+    /usr/local/bin/containerd_ipv6_gateway \
+    /usr/local/bin/containerd_ipv6_network_mode \
     /usr/local/bin/containerd_main_interface \
     /usr/local/bin/containerd_firewall_backend \
     /usr/local/bin/containerd_storage_driver \

@@ -1,7 +1,7 @@
 #!/bin/bash
 # from
 # https://github.com/oneclickvirt/containerd
-# 2026.03.01
+# 2026.08.26
 
 # Usage:
 # ./onecontainerd.sh <name> <cpu> <memory_mb> <password> <sshport> <startport> <endport> [independent_ipv6:y/n] [system] [disk_gb]
@@ -315,7 +315,9 @@ containerd_ipv6_ready() {
     [[ -s /usr/local/bin/containerd_ipv6_subnet ]] || return 1
     [[ -f /etc/cni/net.d/11-containerd-ipv6.conflist ]] || return 1
     command -v nerdctl >/dev/null 2>&1 || return 1
-    [[ "$(nerdctl inspect -f '{{.State.Status}}' ndpresponder 2>/dev/null || true)" == "running" ]] || return 1
+    if [[ "$(cat /usr/local/bin/containerd_ipv6_network_mode 2>/dev/null || true)" != "nat" ]]; then
+        [[ "$(nerdctl inspect -f '{{.State.Status}}' ndpresponder 2>/dev/null || true)" == "running" ]] || return 1
+    fi
     return 0
 }
 if containerd_ipv6_ready; then

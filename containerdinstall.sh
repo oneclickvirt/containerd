@@ -1,7 +1,7 @@
 #!/bin/bash
 # from
 # https://github.com/oneclickvirt/containerd
-# 2026.03.01
+# 2026.08.26
 #
 # Supported environment variables (non-interactive mode / 支持的环境变量，可实现无交互安装):
 #   noninteractive=true          - Use defaults for prompts / 使用默认值跳过交互提示
@@ -694,7 +694,7 @@ configure_cni() {
       "type": "bridge",
       "bridge": "ctn-br0",
       "isGateway": true,
-      "ipMasq": true,
+      "ipMasq": false,
       "promiscMode": true,
       "ipam": {
         "type": "host-local",
@@ -885,34 +885,63 @@ adapt_ipv6() {
     fi
     sysctl --system >/dev/null 2>&1 || true
 
-    local ipv6_subnet=""
+    local ipv6_subnet="" ipv4_subnet="172.21.0.0/16" ipv6_mode=""
     if [[ -f /usr/local/bin/containerd_ipv6_subnet ]]; then
         ipv6_subnet=$(cat /usr/local/bin/containerd_ipv6_subnet)
     fi
+    ipv6_mode=$(cat /usr/local/bin/containerd_ipv6_network_mode 2>/dev/null || true)
 
     if [[ "$FIREWALL_BACKEND" == "nftables" ]]; then
+        # ipMasq is disabled in the CNI config so both the IPv4 side of this
+        # dual-stack bridge and ULA NAT66 are owned by one persistent rule set.
+        setup_nftables_ipv4
+        nft list chain ip containerd postrouting >/dev/null 2>&1 || return 1
+        nft list chain ip containerd forward >/dev/null 2>&1 || return 1
+        nft add rule ip containerd postrouting ip saddr "$ipv4_subnet" ip daddr != "$ipv4_subnet" masquerade 2>/dev/null || return 1
+        nft add rule ip containerd forward ip saddr "$ipv4_subnet" accept 2>/dev/null || return 1
+        nft add rule ip containerd forward ip daddr "$ipv4_subnet" accept 2>/dev/null || return 1
         nft delete table ip6 containerd 2>/dev/null || true
-        nft add table ip6 containerd 2>/dev/null || true
-        nft add chain ip6 containerd forward '{ type filter hook forward priority filter; policy accept; }' 2>/dev/null || true
-        nft add rule ip6 containerd forward iifname "ctn-br1" accept 2>/dev/null || true
-        nft add rule ip6 containerd forward oifname "ctn-br1" accept 2>/dev/null || true
+        nft add table ip6 containerd 2>/dev/null || return 1
+        nft add chain ip6 containerd forward '{ type filter hook forward priority filter; policy accept; }' 2>/dev/null || return 1
+        nft add rule ip6 containerd forward iifname "ctn-br1" accept 2>/dev/null || return 1
+        nft add rule ip6 containerd forward oifname "ctn-br1" accept 2>/dev/null || return 1
         if [[ -n "$ipv6_subnet" ]]; then
-            nft add rule ip6 containerd forward ip6 saddr "$ipv6_subnet" accept 2>/dev/null || true
-            nft add rule ip6 containerd forward ip6 daddr "$ipv6_subnet" accept 2>/dev/null || true
+            nft add rule ip6 containerd forward ip6 saddr "$ipv6_subnet" accept 2>/dev/null || return 1
+            nft add rule ip6 containerd forward ip6 daddr "$ipv6_subnet" accept 2>/dev/null || return 1
         fi
-        _green "nftables IPv6 FORWARD rules configured"
+        if [[ "$ipv6_mode" == "nat" && -n "$ipv6_subnet" ]]; then
+            nft add chain ip6 containerd postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || return 1
+            nft add rule ip6 containerd postrouting ip6 saddr "$ipv6_subnet" ip6 daddr != "$ipv6_subnet" masquerade 2>/dev/null || return 1
+            nft list chain ip6 containerd postrouting 2>/dev/null | grep -Fq "ip6 saddr ${ipv6_subnet}" || return 1
+        fi
+        _green "nftables IPv4/IPv6 forwarding rules configured"
     elif [[ "$FIREWALL_BACKEND" == "iptables" ]] && command -v ip6tables >/dev/null 2>&1; then
+        command -v iptables >/dev/null 2>&1 || return 1
+        iptables -t nat -C POSTROUTING -s "$ipv4_subnet" ! -d "$ipv4_subnet" -j MASQUERADE 2>/dev/null || \
+            iptables -t nat -A POSTROUTING -s "$ipv4_subnet" ! -d "$ipv4_subnet" -j MASQUERADE 2>/dev/null || return 1
+        iptables -C FORWARD -s "$ipv4_subnet" -j ACCEPT 2>/dev/null || \
+            iptables -A FORWARD -s "$ipv4_subnet" -j ACCEPT 2>/dev/null || return 1
+        iptables -C FORWARD -d "$ipv4_subnet" -j ACCEPT 2>/dev/null || \
+            iptables -A FORWARD -d "$ipv4_subnet" -j ACCEPT 2>/dev/null || return 1
         if [[ -n "$ipv6_subnet" ]]; then
             ip6tables -C FORWARD -s "${ipv6_subnet}" -j ACCEPT 2>/dev/null || \
-                ip6tables -A FORWARD -s "${ipv6_subnet}" -j ACCEPT 2>/dev/null || true
+                ip6tables -A FORWARD -s "${ipv6_subnet}" -j ACCEPT 2>/dev/null || return 1
             ip6tables -C FORWARD -d "${ipv6_subnet}" -j ACCEPT 2>/dev/null || \
-                ip6tables -A FORWARD -d "${ipv6_subnet}" -j ACCEPT 2>/dev/null || true
+                ip6tables -A FORWARD -d "${ipv6_subnet}" -j ACCEPT 2>/dev/null || return 1
         fi
         ip6tables -C FORWARD -i ctn-br1 -j ACCEPT 2>/dev/null || \
-            ip6tables -A FORWARD -i ctn-br1 -j ACCEPT 2>/dev/null || true
+            ip6tables -A FORWARD -i ctn-br1 -j ACCEPT 2>/dev/null || return 1
         ip6tables -C FORWARD -o ctn-br1 -j ACCEPT 2>/dev/null || \
-            ip6tables -A FORWARD -o ctn-br1 -j ACCEPT 2>/dev/null || true
-        _green "iptables IPv6 FORWARD rules configured"
+            ip6tables -A FORWARD -o ctn-br1 -j ACCEPT 2>/dev/null || return 1
+        if [[ "$ipv6_mode" == "nat" && -n "$ipv6_subnet" ]]; then
+            ip6tables -t nat -C POSTROUTING -s "${ipv6_subnet}" ! -d "${ipv6_subnet}" -j MASQUERADE 2>/dev/null || \
+                ip6tables -t nat -A POSTROUTING -s "${ipv6_subnet}" ! -d "${ipv6_subnet}" -j MASQUERADE 2>/dev/null || return 1
+            ip6tables -t nat -C POSTROUTING -s "${ipv6_subnet}" ! -d "${ipv6_subnet}" -j MASQUERADE 2>/dev/null || return 1
+        fi
+        _green "iptables IPv4/IPv6 forwarding rules configured"
+    else
+        _red "No usable firewall backend is available for Containerd IPv6"
+        return 1
     fi
     persist_firewall_rules 2>/dev/null || true
 }
@@ -947,6 +976,193 @@ for root, _, files in os.walk(config_dir):
                 raise SystemExit(0)
 raise SystemExit(1)
 PY
+}
+
+# A public child of an on-link host prefix is not an independent CNI network.
+# Netavark/CNI rejects the overlap even when the child has no assigned host
+# address, so compare both local addresses and connected routes.
+cni_ipv6_subnet_overlaps_host() {
+    local subnet="$1"
+    command -v python3 >/dev/null 2>&1 || return 2
+    {
+        ip -6 -o addr show 2>/dev/null | awk '$0 !~ / tentative/ {print $4}'
+        ip -6 route show table all 2>/dev/null | awk '$1 ~ /^[0-9A-Fa-f:]+\/[0-9]+$/ {print $1}'
+    } | python3 -c '
+import ipaddress
+import sys
+
+try:
+    candidate = ipaddress.IPv6Network(sys.argv[1], strict=False)
+except ValueError:
+    raise SystemExit(2)
+for raw in sys.stdin:
+    try:
+        existing = ipaddress.IPv6Network(raw.strip(), strict=False)
+    except ValueError:
+        continue
+    if candidate.overlaps(existing):
+        raise SystemExit(0)
+raise SystemExit(1)
+' "$subnet"
+}
+
+containerd_ipv6_ula_candidate() {
+    local index="$1"
+    python3 - "$index" <<'PY'
+import ipaddress
+import sys
+
+base = ipaddress.IPv6Network("fd42:5339:296f:1e00::/56")
+index = int(sys.argv[1])
+print(ipaddress.IPv6Network((int(base.network_address) + (index << 64), 64)))
+PY
+}
+
+containerd_ipv6_ula_gateway() {
+    python3 - "$1" <<'PY'
+import ipaddress
+import sys
+
+network = ipaddress.IPv6Network(sys.argv[1], strict=False)
+print(ipaddress.IPv6Address(int(network.network_address) + 1))
+PY
+}
+
+containerd_ipv6_ula_is_safe() {
+    local subnet="$1"
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$subnet" <<'PY'
+import ipaddress
+import sys
+
+try:
+    network = ipaddress.IPv6Network(sys.argv[1], strict=False)
+except ValueError:
+    raise SystemExit(1)
+raise SystemExit(0 if network.prefixlen == 64 and network.subnet_of(ipaddress.IPv6Network("fc00::/7")) else 1)
+PY
+}
+
+# Return the sole IPv6 subnet from the installer-owned CNI conflist. A
+# malformed or multi-subnet file is deliberately not safe to overwrite.
+containerd_cni_ipv6_subnet() {
+    local config="${1:-/etc/cni/net.d/11-containerd-ipv6.conflist}"
+    [[ -f "$config" ]] || return 1
+    command -v python3 >/dev/null 2>&1 || return 2
+    python3 - "$config" <<'PY'
+import ipaddress
+import json
+import sys
+
+try:
+    with open(sys.argv[1], encoding="utf-8") as handle:
+        config = json.load(handle)
+except (OSError, json.JSONDecodeError):
+    raise SystemExit(2)
+
+subnets = []
+invalid_subnet = False
+
+def walk(value):
+    global invalid_subnet
+    if isinstance(value, dict):
+        for key, child in value.items():
+            if key == "subnet" and isinstance(child, str):
+                try:
+                    network = ipaddress.ip_network(child, strict=False)
+                except ValueError:
+                    invalid_subnet = True
+                    continue
+                if network.version == 6:
+                    subnets.append(str(network))
+            else:
+                walk(child)
+    elif isinstance(value, list):
+        for child in value:
+            walk(child)
+
+walk(config)
+if invalid_subnet:
+    raise SystemExit(2)
+subnets = sorted(set(subnets))
+if not subnets:
+    raise SystemExit(1)
+if len(subnets) != 1:
+    raise SystemExit(2)
+print(subnets[0])
+PY
+}
+
+# A connected bridge route for a previously created ULA is expected. Reuse it
+# only when both on-disk state values prove that the bridge belongs to us.
+containerd_ipv6_ula_state_matches_cni() {
+    local recorded_mode="$1" recorded_subnet="$2" cni_subnet="$3"
+    [[ "$recorded_mode" == "nat" && "$recorded_subnet" == "$cni_subnet" ]] || return 1
+    containerd_ipv6_ula_is_safe "$cni_subnet"
+}
+
+create_containerd_ula_ipv6_network() {
+    local public_parent="$1" subnet gateway index existing_subnet recorded_mode recorded_subnet
+    local cni_config="${CONTAINERD_CNI_IPV6_CONFIG:-/etc/cni/net.d/11-containerd-ipv6.conflist}"
+    local state_dir="${CONTAINERD_IPV6_STATE_DIR:-/usr/local/bin}"
+    if [[ -e "$cni_config" || -L "$cni_config" ]]; then
+        existing_subnet=$(containerd_cni_ipv6_subnet "$cni_config" 2>/dev/null || true)
+        recorded_mode=$(tr -d '[:space:]' <"${state_dir}/containerd_ipv6_network_mode" 2>/dev/null || true)
+        recorded_subnet=$(tr -d '[:space:]' <"${state_dir}/containerd_ipv6_subnet" 2>/dev/null || true)
+        if ! containerd_ipv6_ula_state_matches_cni "$recorded_mode" "$recorded_subnet" "$existing_subnet"; then
+            _yellow "Existing Containerd IPv6 CNI network is not the installer-managed ULA NAT66 network; preserving its current configuration"
+            _yellow "现有 Containerd IPv6 CNI 网络不是安装器托管的 ULA NAT66 网络，保留其当前配置"
+            return 1
+        fi
+        gateway=$(containerd_ipv6_ula_gateway "$existing_subnet" 2>/dev/null || true)
+        [[ -n "$gateway" ]] || return 1
+        printf '%s\n' "$public_parent" > "${state_dir}/containerd_ipv6_parent"
+        printf '%s\n' "$gateway" > "${state_dir}/containerd_ipv6_gateway"
+        _green "Reusing installer-managed Containerd ULA IPv6 network: ${existing_subnet}"
+        _green "复用安装器托管的 Containerd ULA IPv6 网络：${existing_subnet}"
+        return 0
+    fi
+    for index in $(seq 0 255); do
+        subnet=$(containerd_ipv6_ula_candidate "$index" 2>/dev/null || true)
+        gateway=$(containerd_ipv6_ula_gateway "$subnet" 2>/dev/null || true)
+        [[ -n "$subnet" && -n "$gateway" ]] || continue
+        cni_ipv6_subnet_overlaps_host "$subnet" && continue
+        cni_ipv6_subnet_overlaps_existing "$subnet" && continue
+        cat > "$cni_config" <<EOF
+{
+  "cniVersion": "1.0.0",
+  "name": "containerd-ipv6",
+  "plugins": [
+    {
+      "type": "bridge",
+      "bridge": "ctn-br1",
+      "isGateway": true,
+      "ipMasq": false,
+      "promiscMode": true,
+      "ipam": {
+        "type": "host-local",
+        "ranges": [
+          [{"subnet": "172.21.0.0/16", "gateway": "172.21.0.1"}],
+          [{"subnet": "${subnet}", "gateway": "${gateway}"}]
+        ],
+        "routes": [{"dst": "0.0.0.0/0"}, {"dst": "::/0"}]
+      }
+    },
+    {"type": "portmap", "capabilities": {"portMappings": true}},
+    {"type": "firewall"},
+    {"type": "tuning"}
+  ]
+}
+EOF
+        printf '%s\n' "$public_parent" > "${state_dir}/containerd_ipv6_parent"
+        printf '%s\n' "$subnet" > "${state_dir}/containerd_ipv6_subnet"
+        printf '%s\n' "$gateway" > "${state_dir}/containerd_ipv6_gateway"
+        printf '%s\n' nat > "${state_dir}/containerd_ipv6_network_mode"
+        _yellow "Host IPv6 route overlaps the requested public CNI child; using isolated ULA ${subnet} with NAT66"
+        _yellow "宿主机 IPv6 路由覆盖了请求的公网 CNI 子网，改用隔离 ULA ${subnet} 并启用 NAT66"
+        return 0
+    done
+    return 1
 }
 
 derive_containerd_ipv6_subnet() {
@@ -1034,6 +1250,13 @@ create_ipv6_network() {
         _red "Failed to derive a dedicated IPv6 CNI subnet from locally bound ${ipv6_cidr}."
         return 1
     fi
+    if cni_ipv6_subnet_overlaps_host "$prefix"; then
+        if create_containerd_ula_ipv6_network "$ipv6_cidr"; then
+            return 0
+        fi
+        _red "Could not find a host-disjoint ULA subnet for Containerd IPv6"
+        return 1
+    fi
     if cni_ipv6_subnet_overlaps_existing "$prefix"; then
         _red "IPv6 CNI subnet ${prefix} overlaps an existing CNI network."
         return 1
@@ -1041,6 +1264,7 @@ create_ipv6_network() {
 
     echo "$ipv6_cidr" > /usr/local/bin/containerd_ipv6_parent
     echo "$prefix" > /usr/local/bin/containerd_ipv6_subnet
+    echo managed > /usr/local/bin/containerd_ipv6_network_mode
 
     cat > /etc/cni/net.d/11-containerd-ipv6.conflist <<EOF
 {
@@ -1159,6 +1383,10 @@ resolve_ndpresponder_image() {
 }
 
 start_ndpresponder() {
+    if [[ "$(cat /usr/local/bin/containerd_ipv6_network_mode 2>/dev/null || true)" == "nat" ]]; then
+        _green "Containerd IPv6 uses ULA NAT66; NDP responder is not required"
+        return 0
+    fi
     _yellow "Starting NDP responder for IPv6..."
     local ndp_status ndp_logs ndp_image
 
@@ -1265,7 +1493,7 @@ main() {
     _blue "======================================================"
     _blue "  Containerd 容器运行时一键安装脚本"
     _blue "  from https://github.com/oneclickvirt/containerd"
-    _blue "  2026.03.01"
+    _blue "  2026.08.26"
     _blue "======================================================"
     echo
 

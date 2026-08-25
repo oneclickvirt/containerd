@@ -10,6 +10,16 @@ extract_function() {
         $0 == name "() {" { printing = 1 }
         printing {
             print
+            if ($0 ~ /<<EOF$/) {
+                in_heredoc = 1
+                next
+            }
+            if (in_heredoc) {
+                if ($0 == "EOF") {
+                    in_heredoc = 0
+                }
+                next
+            }
             if ($0 == "}") {
                 exit
             }
@@ -19,6 +29,20 @@ extract_function() {
 
 # shellcheck disable=SC1090 # The test intentionally loads one installer function.
 source <(extract_function derive_containerd_ipv6_subnet)
+# shellcheck disable=SC1090 # The test intentionally loads the host overlap helper.
+source <(extract_function cni_ipv6_subnet_overlaps_host)
+# shellcheck disable=SC1090 # The test intentionally loads the ULA candidate helper.
+source <(extract_function containerd_ipv6_ula_candidate)
+# shellcheck disable=SC1090 # The test intentionally loads ULA validation helpers.
+source <(extract_function containerd_ipv6_ula_is_safe)
+# shellcheck disable=SC1090 # The test intentionally loads the CNI state guard.
+source <(extract_function containerd_ipv6_ula_state_matches_cni)
+# shellcheck disable=SC1090 # The test intentionally loads the CNI subnet reader.
+source <(extract_function containerd_cni_ipv6_subnet)
+# shellcheck disable=SC1090 # The test intentionally loads the ULA gateway helper.
+source <(extract_function containerd_ipv6_ula_gateway)
+# shellcheck disable=SC1090 # The test intentionally loads the CNI reuse implementation.
+source <(extract_function create_containerd_ula_ipv6_network)
 # shellcheck disable=SC1090 # The test intentionally loads installer helpers.
 source <(extract_function is_public_ipv6)
 # shellcheck disable=SC1090 # The test intentionally loads one installer function.
@@ -32,6 +56,10 @@ tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/containerd-ipv6-test.XXXXXX")
 trap 'rm -rf -- "$tmpdir"' EXIT
 cat > "$tmpdir/ip" <<'EOF'
 #!/bin/sh
+if [ "${1:-}" = "-6" ] && [ "${2:-}" = "route" ]; then
+    printf '%s\n' '2a14:6781:a::/64 dev eth0 proto kernel metric 256'
+    exit 0
+fi
 printf '%s\n' '2: eth0    inet6 fd42::1/64 scope global'
 printf '%s\n' '2: eth0    inet6 2a14:6781:000a:0000::9/64 scope global tentative'
 printf '%s\n' '2: eth0    inet6 2a14:6781:000a:0000::10/64 scope global'
@@ -51,6 +79,66 @@ if derive_containerd_ipv6_subnet "$host_cidr" 96 0 true >/dev/null; then
     printf 'explicit host-containing CNI subnet was accepted\n' >&2
     exit 1
 fi
+if ! cni_ipv6_subnet_overlaps_host "2a14:6781:a::1:0:0/96"; then
+    printf 'connected host IPv6 route was not detected as a CNI overlap\n' >&2
+    exit 1
+fi
+ula_candidate=$(containerd_ipv6_ula_candidate 0)
+if cni_ipv6_subnet_overlaps_host "$ula_candidate"; then
+    printf 'isolated Containerd ULA unexpectedly overlaps the host route\n' >&2
+    exit 1
+fi
+if ! containerd_ipv6_ula_state_matches_cni nat "$ula_candidate" "$ula_candidate"; then
+    printf 'installer-managed Containerd ULA was not accepted for reuse\n' >&2
+    exit 1
+fi
+if containerd_ipv6_ula_state_matches_cni managed "$ula_candidate" "$ula_candidate" ||
+   containerd_ipv6_ula_state_matches_cni nat "fd42:5339:296f:1e01::/64" "$ula_candidate" ||
+   containerd_ipv6_ula_state_matches_cni nat "2a14:6781:a::/64" "2a14:6781:a::/64"; then
+    printf 'unmanaged or mismatched Containerd IPv6 CNI network was accepted for reuse\n' >&2
+    exit 1
+fi
+cat > "$tmpdir/known-cni.conflist" <<EOF
+{
+  "plugins": [{"ipam": {"ranges": [[{"subnet": "172.21.0.0/16"}], [{"subnet": "${ula_candidate}"}]]}}]
+}
+EOF
+if [[ "$(containerd_cni_ipv6_subnet "$tmpdir/known-cni.conflist")" != "$ula_candidate" ]]; then
+    printf 'Containerd CNI subnet reader did not return its sole IPv6 subnet\n' >&2
+    exit 1
+fi
+ula_gateway=$(containerd_ipv6_ula_gateway "$ula_candidate")
+mkdir -p "$tmpdir/state"
+export CONTAINERD_CNI_IPV6_CONFIG="$tmpdir/managed-cni.conflist"
+export CONTAINERD_IPV6_STATE_DIR="$tmpdir/state"
+cat > "$CONTAINERD_CNI_IPV6_CONFIG" <<EOF
+{
+  "plugins": [{"ipam": {"ranges": [[{"subnet": "172.21.0.0/16"}], [{"subnet": "${ula_candidate}", "gateway": "${ula_gateway}"}]]}}]
+}
+EOF
+printf 'nat\n' > "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_network_mode"
+printf '%s\n' "$ula_candidate" > "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_subnet"
+cp "$CONTAINERD_CNI_IPV6_CONFIG" "$tmpdir/original-managed-cni.conflist"
+_green() { :; }
+_yellow() { :; }
+if ! create_containerd_ula_ipv6_network '2a14:6781:a::9/64'; then
+    printf 'installer-managed Containerd ULA CNI network was not reused\n' >&2
+    exit 1
+fi
+if ! cmp -s "$CONTAINERD_CNI_IPV6_CONFIG" "$tmpdir/original-managed-cni.conflist"; then
+    printf 'reusing Containerd ULA CNI unexpectedly rewrote its configuration\n' >&2
+    exit 1
+fi
+printf 'managed\n' > "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_network_mode"
+if create_containerd_ula_ipv6_network '2a14:6781:a::9/64'; then
+    printf 'unmanaged Containerd CNI network was incorrectly reused\n' >&2
+    exit 1
+fi
+if ! cmp -s "$CONTAINERD_CNI_IPV6_CONFIG" "$tmpdir/original-managed-cni.conflist"; then
+    printf 'unmanaged Containerd CNI configuration was overwritten\n' >&2
+    exit 1
+fi
+unset CONTAINERD_CNI_IPV6_CONFIG CONTAINERD_IPV6_STATE_DIR
 export PATH="$old_path"
 
 if ! is_public_ipv6 "2a14:6781:a::9"; then
@@ -84,6 +172,14 @@ if extract_function check_ipv6 | grep -Eq 'API_NET|curl[[:space:]]'; then
 fi
 if ! extract_function adapt_ipv6 | grep -Fq 'net.ipv6.conf.${interface}.accept_ra=2'; then
     printf 'Containerd IPv6 forwarding must preserve router advertisements on the uplink\n' >&2
+    exit 1
+fi
+if ! extract_function create_containerd_ula_ipv6_network | grep -Fq '"ipMasq": false'; then
+    printf 'Containerd ULA NAT66 must use the installer-owned firewall rule set exactly once\n' >&2
+    exit 1
+fi
+if ! extract_function create_containerd_ula_ipv6_network | grep -Fq 'containerd_ipv6_ula_state_matches_cni'; then
+    printf 'Containerd ULA reuse must be guarded by matching installer state\n' >&2
     exit 1
 fi
 if ! ndpresponder_image_matches_architecture arm64 arm64 ||
