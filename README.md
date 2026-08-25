@@ -52,7 +52,8 @@ bash <(wget -qO- https://raw.githubusercontent.com/oneclickvirt/containerd/main/
 | CONTAINERD_LOOP_FILE | btrfs loop 文件路径 | /opt/containerd-pool.img |
 | CONTAINERD_MAIN_INTERFACE | 指定宿主机出口网卡，供 NAT/NDP 使用 | 自动检测 |
 | CONTAINERD_IPV6_SUBNET_PREFIX | 从宿主机 IPv6 父网段切出的 CNI 子网前缀 | 80 |
-| CONTAINERD_IPV6_SUBNET_INDEX | 从 /64 父网段中选择第几个子网（从 0 开始） | 1 |
+| CONTAINERD_IPV6_SUBNET_INDEX | 优先选择的 IPv6 CNI 子网序号（从 0 开始；显式设置时不会自动换号） | 1 |
+| NDPRESPONDER_SOURCE_URL | `https://github.com/oneclickvirt/ndpresponder.git` | responder 官方镜像不可用或架构不符时使用的 Git 源码地址（安装脚本会浅克隆后本地构建） |
 
 ## 开设单个容器
 
@@ -196,7 +197,8 @@ bash scripts/containerd_manage.sh version-check debian
 
 - **IPv4**：通过 `-p` 端口映射（bridge 模式，CNI `containerd-net`）
 - **出口网卡**：默认通过路由自动检测，也可用 `CONTAINERD_MAIN_INTERFACE=eth0` 指定，供 IPv4 NAT 和 IPv6 NDP 使用
-- **IPv6（独立地址）**：安装时自动检测公网 IPv6 父前缀，默认从宿主机 `/64` 中切出 `/80` CNI 子网，创建 `containerd-ipv6` 网络，并启动 NDP Responder 容器实现 IPv6 NDP 代理
+- **IPv6（独立地址）**：安装时只接受宿主机本地绑定的公网 IPv6 父前缀，不把外部出口检测结果伪造成 `/64`。默认从父前缀切出 `/80` CNI 子网，并跳过包含任意宿主机地址的候选子网；也会拒绝与其他 CNI 配置重叠的子网。
+- **NDP**：`containerd-ipv6` 使用 CNI `host-local` 租约，NDP responder 只读监听 `/var/lib/cni/networks/containerd-ipv6`，不依赖 Docker API。官方镜像不可拉取、架构错误或 ARMv7 无发布标签时，安装脚本会浅克隆 `NDPRESPONDER_SOURCE_URL` 后从本地上下文构建并重新校验镜像，构建失败时不会替换已有 responder。只有 CNI 配置创建、NDP responder 启动和存活检查均成功时，独立 IPv6 才会启用；否则容器仍使用 IPv4 CNI 网络。
 - **DNS 保活**：通过 `check-dns.service` 系统服务持续检测 DNS 可用性
 
 ## Stargazers over time

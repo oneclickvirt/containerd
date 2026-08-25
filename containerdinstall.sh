@@ -12,7 +12,7 @@
 #   CONTAINERD_LOOP_FILE=       - Loop file path / 循环文件路径；默认: /opt/containerd-pool.img
 #   CONTAINERD_MAIN_INTERFACE=  - Host outbound interface / 宿主机出口网卡；默认自动检测
 #   CONTAINERD_IPV6_SUBNET_PREFIX=80 - IPv6 CNI subnet prefix / IPv6 CNI 子网前缀；默认: 80
-#   CONTAINERD_IPV6_SUBNET_INDEX=1   - IPv6 subnet index cut from /64 / 从 /64 中切出的子网序号；默认: 1
+#   CONTAINERD_IPV6_SUBNET_INDEX=1   - preferred IPv6 subnet index / 优先选择的 IPv6 子网序号；默认: 1
 #
 # Example / 示例:
 #   export noninteractive=true
@@ -185,12 +185,40 @@ update_sysctl() {
 }
 
 is_private_ipv6() {
-    local addr="$1"
-    [[ "$addr" =~ ^fd ]] && return 0
-    [[ "$addr" =~ ^fc ]] && return 0
-    [[ "$addr" =~ ^fe[89ab] ]] && return 0
-    [[ "$addr" == "::1" ]] && return 0
-    return 1
+    ! is_public_ipv6 "${1:-}"
+}
+
+is_public_ipv6() {
+    local addr="${1:-}"
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$addr" <<'PY'
+import ipaddress
+import sys
+
+try:
+    address = ipaddress.IPv6Address(sys.argv[1])
+except ValueError:
+    raise SystemExit(1)
+
+global_unicast = ipaddress.IPv6Network("2000::/3")
+non_public = (
+    ipaddress.IPv6Network("2001::/32"),       # Teredo
+    ipaddress.IPv6Network("2001:2::/48"),     # benchmarking
+    ipaddress.IPv6Network("2001:10::/28"),    # ORCHID
+    ipaddress.IPv6Network("2001:20::/28"),    # ORCHIDv2
+    ipaddress.IPv6Network("2001:db8::/32"),   # documentation
+    ipaddress.IPv6Network("2002::/16"),       # 6to4
+    ipaddress.IPv6Network("3fff::/20"),       # documentation
+)
+usable = (
+    address in global_unicast
+    and address.is_global
+    and not address.is_private
+    and not address.is_multicast
+    and not any(address in prefix for prefix in non_public)
+)
+raise SystemExit(0 if usable else 1)
+PY
 }
 
 # ======== 检测公网 IPv6 ========
@@ -199,10 +227,10 @@ detect_global_ipv6_cidr() {
     local candidates=""
     if command -v ip >/dev/null 2>&1; then
         if [[ -n "$dev" ]]; then
-            candidates=$(ip -6 addr show dev "$dev" scope global 2>/dev/null | awk '/inet6/ {print $2}' || true)
+            candidates=$(ip -o -6 addr show dev "$dev" scope global 2>/dev/null | awk '$0 !~ / tentative/ {print $4}' || true)
         fi
         if [[ -z "$candidates" ]]; then
-            candidates=$(ip -6 addr show scope global 2>/dev/null | awk '/inet6/ {print $2}' || true)
+            candidates=$(ip -o -6 addr show scope global 2>/dev/null | awk '$0 !~ / tentative/ {print $4}' || true)
         fi
     fi
 
@@ -212,7 +240,7 @@ detect_global_ipv6_cidr() {
     while IFS= read -r cidr; do
         [[ -n "$cidr" ]] || continue
         addr="${cidr%%/*}"
-        if [[ -n "$addr" ]] && ! is_private_ipv6 "$addr"; then
+        if is_public_ipv6 "$addr"; then
             printf '%s\n' "$cidr"
             return 0
         fi
@@ -223,27 +251,17 @@ detect_global_ipv6_cidr() {
 check_ipv6() {
     IPV6_CIDR=$(detect_global_ipv6_cidr "${interface:-}" || true)
     IPV6="${IPV6_CIDR%%/*}"
-    if [[ -z "$IPV6" ]] || is_private_ipv6 "$IPV6"; then
-        IPV6_CIDR=""
-        IPV6=""
-        local API_NET=("https://ipv6.ip.sb" "https://ipget.net" "https://ipv6.ping0.cc" "https://api.my-ip.io/ip" "https://ipv6.icanhazip.com")
-        for p in "${API_NET[@]}"; do
-            local response
-            response=$(curl -sLk6m8 "$p" 2>/dev/null | tr -d '[:space:]' || true)
-            if [[ -n "$response" ]] && echo "$response" | grep -qE '^[0-9a-fA-F:]+$' && echo "$response" | grep -q ':'; then
-                IPV6="$response"
-                IPV6_CIDR="${response}/64"
-                break
-            fi
-            sleep 1
-        done
-    fi
-    if [[ -n "$IPV6" ]] && ! is_private_ipv6 "$IPV6"; then
-        _green "Detected public IPv6: $IPV6"
-        _blue "IPv6 parent prefix: ${IPV6_CIDR:-${IPV6}/64}"
+    if [[ -n "$IPV6_CIDR" ]] && is_public_ipv6 "$IPV6"; then
+        _green "Locally bound public IPv6 detected: $IPV6 ($IPV6_CIDR)"
+        printf '%s\n' "$IPV6" > /usr/local/bin/containerd_check_ipv6
+        printf '%s\n' "$IPV6_CIDR" > /usr/local/bin/containerd_check_ipv6_cidr
         IPV6_ENABLED=true
     else
-        _yellow "No public IPv6 detected"
+        IPV6_CIDR=""
+        IPV6=""
+        printf '%s\n' "" > /usr/local/bin/containerd_check_ipv6
+        printf '%s\n' "" > /usr/local/bin/containerd_check_ipv6_cidr
+        _yellow "No locally bound public IPv6 prefix found; independent IPv6 setup is disabled"
         IPV6_ENABLED=false
     fi
 }
@@ -436,16 +454,16 @@ install_base_deps() {
         Debian|Ubuntu)
             eval "${PACKAGE_UPDATE[int]}" 2>/dev/null || true
             ${PACKAGE_INSTALL[int]} curl wget ca-certificates nftables iptables iproute2 \
-                socat unzip tar jq python3 2>/dev/null || true
+                socat unzip tar jq python3 git 2>/dev/null || true
             ;;
         CentOS|Fedora)
             ${PACKAGE_INSTALL[int]} curl wget ca-certificates nftables iptables iproute \
-                socat unzip tar jq python3 2>/dev/null || true
+                socat unzip tar jq python3 git 2>/dev/null || true
             ;;
         Alpine)
             ${PACKAGE_UPDATE[int]} 2>/dev/null || true
             ${PACKAGE_INSTALL[int]} curl wget ca-certificates nftables iptables iproute2 \
-                socat unzip tar jq python3 2>/dev/null || true
+                socat unzip tar jq python3 git 2>/dev/null || true
             ;;
     esac
     _green "Base dependencies installed"
@@ -860,6 +878,9 @@ adapt_ipv6() {
     update_sysctl "net.ipv6.conf.default.proxy_ndp=1"
     update_sysctl "net.ipv6.conf.all.proxy_ndp=1"
     if [[ -n "$interface" ]]; then
+        # Forwarding otherwise disables ordinary RA processing on Linux. Keep
+        # the physical uplink's SLAAC default route alive after this setup.
+        update_sysctl "net.ipv6.conf.${interface}.accept_ra=2"
         update_sysctl "net.ipv6.conf.${interface}.proxy_ndp=1"
     fi
     sysctl --system >/dev/null 2>&1 || true
@@ -897,71 +918,125 @@ adapt_ipv6() {
 }
 
 # ======== 创建 IPv6 CNI 网络 ========
+cni_ipv6_subnet_overlaps_existing() {
+    local subnet="$1"
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$subnet" /etc/cni/net.d 2>/dev/null <<'PY'
+import ipaddress
+import os
+import re
+import sys
+
+candidate = ipaddress.ip_network(sys.argv[1], strict=False)
+config_dir = sys.argv[2]
+for root, _, files in os.walk(config_dir):
+    for name in files:
+        if name == "11-containerd-ipv6.conflist":
+            continue
+        path = os.path.join(root, name)
+        try:
+            content = open(path, encoding="utf-8", errors="ignore").read()
+        except OSError:
+            continue
+        for raw in re.findall(r'"subnet"\s*:\s*"([^"]+)"', content):
+            try:
+                existing = ipaddress.ip_network(raw, strict=False)
+            except ValueError:
+                continue
+            if existing.version == 6 and candidate.overlaps(existing):
+                raise SystemExit(0)
+raise SystemExit(1)
+PY
+}
+
+derive_containerd_ipv6_subnet() {
+    local parent="$1" subnet_prefix="$2" subnet_index="$3" index_explicit="$4"
+    command -v python3 >/dev/null 2>&1 || return 1
+    CONTAINERD_IPV6_PARENT="$parent" \
+        CONTAINERD_IPV6_PREFIX="$subnet_prefix" \
+        CONTAINERD_IPV6_INDEX="$subnet_index" \
+        CONTAINERD_IPV6_INDEX_EXPLICIT="$index_explicit" \
+        python3 - 2>/dev/null <<'PY'
+import ipaddress
+import os
+import subprocess
+import sys
+
+try:
+    parent = ipaddress.ip_network(os.environ["CONTAINERD_IPV6_PARENT"], strict=False)
+    requested_prefix = int(os.environ["CONTAINERD_IPV6_PREFIX"])
+    requested_index = int(os.environ["CONTAINERD_IPV6_INDEX"])
+    explicit_index = os.environ.get("CONTAINERD_IPV6_INDEX_EXPLICIT") == "true"
+    if parent.version != 6:
+        raise ValueError("not an IPv6 prefix")
+    target_prefix = max(requested_prefix, parent.prefixlen + 8)
+    if target_prefix > 124:
+        raise ValueError("need a parent prefix shorter than /124 to allocate a CNI subnet")
+    subnet_count = 1 << (target_prefix - parent.prefixlen)
+    if requested_index >= subnet_count:
+        raise ValueError("IPv6 subnet index is outside the parent prefix")
+
+    host_children = set()
+    try:
+        output = subprocess.check_output(["ip", "-6", "-o", "addr", "show"], text=True, stderr=subprocess.DEVNULL)
+    except (OSError, subprocess.CalledProcessError):
+        output = ""
+    child_size = 1 << (128 - target_prefix)
+    for line in output.splitlines():
+        if " tentative " in f" {line} ":
+            continue
+        fields = line.split()
+        if len(fields) < 4:
+            continue
+        try:
+            address = ipaddress.ip_interface(fields[3]).ip
+        except ValueError:
+            continue
+        if address.version == 6 and address in parent:
+            host_children.add((int(address) - int(parent.network_address)) // child_size)
+
+    candidates = [requested_index]
+    if not explicit_index:
+        for offset in range(1, min(subnet_count, 4096)):
+            candidates.append((requested_index + offset) % subnet_count)
+    for index in candidates:
+        if index in host_children:
+            continue
+        address = int(parent.network_address) + index * child_size
+        print(ipaddress.IPv6Network((address, target_prefix)))
+        raise SystemExit(0)
+    raise ValueError("all candidate CNI subnets include a live host address")
+except Exception:
+    raise SystemExit(1)
+PY
+}
+
 create_ipv6_network() {
-    local ipv6_addr="$1"
-    local ipv6_cidr="${2:-}"
-    if [[ -z "$ipv6_cidr" ]]; then
-        ipv6_cidr="${ipv6_addr}/64"
-    fi
+    local ipv6_cidr="$1"
     _yellow "Creating IPv6 CNI network..."
 
     local subnet_prefix="${CONTAINERD_IPV6_SUBNET_PREFIX:-$DEFAULT_CONTAINERD_IPV6_SUBNET_PREFIX}"
     local subnet_index="${CONTAINERD_IPV6_SUBNET_INDEX:-$DEFAULT_CONTAINERD_IPV6_SUBNET_INDEX}"
-    if [[ ! "$subnet_prefix" =~ ^[0-9]+$ ]] || (( subnet_prefix < 64 || subnet_prefix > 120 )); then
-        _red "Invalid CONTAINERD_IPV6_SUBNET_PREFIX='${subnet_prefix}', expected an integer from 64 to 120."
-        exit 1
+    local index_explicit=false
+    [[ -n "${CONTAINERD_IPV6_SUBNET_INDEX+x}" ]] && index_explicit=true
+    if [[ ! "$subnet_prefix" =~ ^[0-9]+$ ]] || (( subnet_prefix < 64 || subnet_prefix > 124 )); then
+        _red "Invalid CONTAINERD_IPV6_SUBNET_PREFIX='${subnet_prefix}', expected an integer from 64 to 124."
+        return 1
     fi
     if [[ ! "$subnet_index" =~ ^[0-9]+$ ]]; then
         _red "Invalid CONTAINERD_IPV6_SUBNET_INDEX='${subnet_index}', expected a non-negative integer."
-        exit 1
+        return 1
     fi
 
-    # 从宿主机 IPv6 父网段中切出稳定的 CNI 子网，默认从 /64 切 /80。
     local prefix=""
-    if command -v python3 >/dev/null 2>&1; then
-        prefix=$(CONTAINERD_IPV6_PARENT="$ipv6_cidr" \
-            CONTAINERD_IPV6_PREFIX="$subnet_prefix" \
-            CONTAINERD_IPV6_INDEX="$subnet_index" \
-            python3 - 2>/dev/null <<'PY' || true
-import ipaddress
-import itertools
-import os
-import sys
-
-try:
-    parent_raw = os.environ["CONTAINERD_IPV6_PARENT"]
-    requested_prefix = int(os.environ["CONTAINERD_IPV6_PREFIX"])
-    requested_index = int(os.environ["CONTAINERD_IPV6_INDEX"])
-    iface = ipaddress.ip_interface(parent_raw)
-    parent = ipaddress.ip_network(parent_raw, strict=False)
-    if parent.version != 6:
-        raise ValueError("not an IPv6 network")
-    if parent.prefixlen > 64:
-        parent = ipaddress.ip_network(f"{iface.ip}/64", strict=False)
-    new_prefix = max(requested_prefix, parent.prefixlen)
-    if new_prefix > 120:
-        raise ValueError("IPv6 CNI subnet prefix must be <= 120")
-    subnet_count = 1 << (new_prefix - parent.prefixlen)
-    if requested_index >= subnet_count:
-        if requested_index == 1 and subnet_count == 1:
-            requested_index = 0
-        else:
-            raise ValueError("IPv6 subnet index is outside the parent prefix")
-    subnet = next(itertools.islice(parent.subnets(new_prefix=new_prefix), requested_index, None))
-    if subnet is None:
-        raise ValueError("failed to cut IPv6 subnet")
-    print(str(subnet))
-except Exception:
-    sys.exit(1)
-PY
-)
-    fi
+    prefix=$(derive_containerd_ipv6_subnet "$ipv6_cidr" "$subnet_prefix" "$subnet_index" "$index_explicit" || true)
     if [[ -z "$prefix" ]]; then
-        prefix=$(echo "$ipv6_addr" | awk -F: '{print $1":"$2":"$3":"$4"::/80"}')
+        _red "Failed to derive a dedicated IPv6 CNI subnet from locally bound ${ipv6_cidr}."
+        return 1
     fi
-    if [[ -z "$prefix" ]]; then
-        _red "Failed to calculate IPv6 CNI subnet from ${ipv6_cidr}."
-        exit 1
+    if cni_ipv6_subnet_overlaps_existing "$prefix"; then
+        _red "IPv6 CNI subnet ${prefix} overlaps an existing CNI network."
+        return 1
     fi
 
     echo "$ipv6_cidr" > /usr/local/bin/containerd_ipv6_parent
@@ -1009,18 +1084,89 @@ PY
 }
 EOF
     _green "IPv6 CNI network (containerd-ipv6) created: $prefix"
+    return 0
 }
 
 # ======== 启动 NDP Responder ========
-start_ndpresponder() {
-    _yellow "Starting NDP responder for IPv6..."
-    local arch_tag
+ndpresponder_image_matches_architecture() {
+    local expected="$1"
+    local actual="$2"
+    case "$expected:$actual" in
+        amd64:amd64|amd64:x86_64|arm64:arm64|arm64:aarch64|arm:arm|arm:armhf|arm:armv7) return 0 ;;
+    esac
+    return 1
+}
+
+# Resolve a responder image before touching the existing container. Published
+# tags cover amd64 and arm64; ARMv7 falls back to a native source build.
+resolve_ndpresponder_image() {
+    local arch_tag="" registry_image="" image_arch source_image source_url source_dir
+    NDPRESPONDER_IMAGE=""
+
     case "$ARCH_TYPE" in
         amd64) arch_tag="x86" ;;
-        arm64) arch_tag="arm64" ;;
-        *)     arch_tag="x86" ;;
+        arm64) arch_tag="aarch64" ;;
+        arm)   ;;
+        *)
+            _yellow "Unsupported responder architecture: ${ARCH_TYPE}"
+            return 1
+            ;;
     esac
 
+    if [[ -n "$arch_tag" ]]; then
+        registry_image="spiritlhl/ndpresponder_${arch_tag}"
+        _yellow "Pulling ndpresponder image: ${registry_image}"
+        if nerdctl pull "${registry_image}" 2>/dev/null; then
+            image_arch=$(nerdctl image inspect --format '{{.Architecture}}' "${registry_image}" 2>/dev/null || true)
+            if ndpresponder_image_matches_architecture "$ARCH_TYPE" "$image_arch"; then
+                NDPRESPONDER_IMAGE="$registry_image"
+                return 0
+            fi
+            _yellow "Responder image ${registry_image} is ${image_arch:-unknown}, expected ${ARCH_TYPE}; building a local responder image instead"
+        else
+            _yellow "Could not pull a responder image for ${ARCH_TYPE}; building a local responder image instead"
+        fi
+    else
+        _yellow "No published responder image is configured for ${ARCH_TYPE}; building a local responder image instead"
+    fi
+
+    source_image="localhost/oneclickvirt-ndpresponder:${ARCH_TYPE}"
+    source_url="${NDPRESPONDER_SOURCE_URL:-https://github.com/oneclickvirt/ndpresponder.git}"
+    source_dir=$(mktemp -d /tmp/ndpresponder-build.XXXXXX) || {
+        _yellow "Could not create a temporary responder source directory; preserving any existing responder"
+        return 1
+    }
+    _yellow "Cloning ndpresponder source: ${source_url}"
+    if ! GIT_TERMINAL_PROMPT=0 git clone --depth 1 -- "$source_url" "$source_dir" >/dev/null 2>&1; then
+        rm -rf -- "$source_dir"
+        _yellow "Could not fetch responder source; preserving any existing responder"
+        return 1
+    fi
+    _yellow "Building ndpresponder from source: ${source_url}"
+    if ! nerdctl build --tag "$source_image" "$source_dir"; then
+        rm -rf -- "$source_dir"
+        _yellow "Could not build a responder image from source; preserving any existing responder"
+        return 1
+    fi
+    image_arch=$(nerdctl image inspect --format '{{.Architecture}}' "$source_image" 2>/dev/null || true)
+    rm -rf -- "$source_dir"
+    if ! ndpresponder_image_matches_architecture "$ARCH_TYPE" "$image_arch"; then
+        _yellow "Locally built responder image ${source_image} is ${image_arch:-unknown}, expected ${ARCH_TYPE}; preserving any existing responder"
+        return 1
+    fi
+    NDPRESPONDER_IMAGE="$source_image"
+    return 0
+}
+
+start_ndpresponder() {
+    _yellow "Starting NDP responder for IPv6..."
+    local ndp_status ndp_logs ndp_image
+
+    mkdir -p /var/lib/cni/networks
+    if ! resolve_ndpresponder_image; then
+        return 1
+    fi
+    ndp_image="$NDPRESPONDER_IMAGE"
     nerdctl rm -f ndpresponder 2>/dev/null || true
 
     if nerdctl run -d \
@@ -1031,13 +1177,24 @@ start_ndpresponder() {
         --cap-add=NET_RAW \
         --cap-add=NET_ADMIN \
         --network host \
+        --volume /var/lib/cni/networks:/var/lib/cni/networks:ro \
         --name ndpresponder \
-        "spiritlhl/ndpresponder_${arch_tag}" \
-        -i "${interface}" -N containerd-ipv6 2>/dev/null; then
-        _green "NDP responder started"
+        "${ndp_image}" \
+        -i "${interface}" -C containerd-ipv6 2>/dev/null; then
+        for _ndp_attempt in 1 2 3; do
+            sleep 1
+            ndp_status=$(nerdctl inspect -f '{{.State.Status}}' ndpresponder 2>/dev/null || true)
+            if [[ "$ndp_status" == "running" ]]; then
+                _green "NDP responder started and is reading CNI IPv6 leases"
+                return 0
+            fi
+        done
+        ndp_logs=$(nerdctl logs --tail 20 ndpresponder 2>&1 || true)
+        _yellow "ndpresponder exited immediately: ${ndp_logs}"
     else
         _yellow "ndpresponder start failed; IPv6 may require manual NDP configuration"
     fi
+    return 1
 }
 
 # ======== DNS 保活服务 ========
@@ -1242,12 +1399,13 @@ main() {
     start_services
     setup_dns_check
 
-    if [[ "$IPV6_ENABLED" == true ]]; then
-        create_ipv6_network "$IPV6" "${IPV6_CIDR:-${IPV6}/64}"
-        adapt_ipv6
-        start_ndpresponder
+    if [[ "$IPV6_ENABLED" == true ]] && \
+       create_ipv6_network "$IPV6_CIDR" && \
+       adapt_ipv6 && \
+       start_ndpresponder; then
         echo "true" > /usr/local/bin/containerd_ipv6_enabled
     else
+        _yellow "Independent IPv6 was not enabled; IPv4 container networking remains available"
         echo "false" > /usr/local/bin/containerd_ipv6_enabled
     fi
 

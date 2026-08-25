@@ -270,6 +270,8 @@ for f in \
     /usr/local/bin/containerd_arch \
     /usr/local/bin/containerd_cdn \
     /usr/local/bin/containerd_ipv6_enabled \
+    /usr/local/bin/containerd_check_ipv6 \
+    /usr/local/bin/containerd_check_ipv6_cidr \
     /usr/local/bin/containerd_ipv6_parent \
     /usr/local/bin/containerd_ipv6_subnet \
     /usr/local/bin/containerd_main_interface \

@@ -309,10 +309,19 @@ fi
 
 # ======== IPv6 检测 ========
 IPV6_ENABLED=false
-if [[ -f /usr/local/bin/containerd_ipv6_enabled ]]; then
-    if [[ "$(cat /usr/local/bin/containerd_ipv6_enabled)" == "true" ]]; then
-        IPV6_ENABLED=true
-    fi
+containerd_ipv6_ready() {
+    [[ -f /usr/local/bin/containerd_ipv6_enabled ]] || return 1
+    [[ "$(cat /usr/local/bin/containerd_ipv6_enabled 2>/dev/null)" == "true" ]] || return 1
+    [[ -s /usr/local/bin/containerd_ipv6_subnet ]] || return 1
+    [[ -f /etc/cni/net.d/11-containerd-ipv6.conflist ]] || return 1
+    command -v nerdctl >/dev/null 2>&1 || return 1
+    [[ "$(nerdctl inspect -f '{{.State.Status}}' ndpresponder 2>/dev/null || true)" == "running" ]] || return 1
+    return 0
+}
+if containerd_ipv6_ready; then
+    IPV6_ENABLED=true
+else
+    _yellow "Independent IPv6 is not ready; using the managed IPv4 CNI network"
 fi
 
 # ======== lxcfs 检测（提供 /proc 虚假值） ========
