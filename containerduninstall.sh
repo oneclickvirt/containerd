@@ -91,7 +91,9 @@ fi
 
 # ======== 3. 停止 systemd 服务 ========
 _blue "[3/10] 停止并禁用 systemd 服务..."
-for svc in buildkit buildkitd containerd check-dns nftables; do
+# nftables is a host-wide firewall service, not a Containerd-owned daemon.
+# Leave it enabled so removing Containerd cannot take down unrelated rules.
+for svc in buildkit buildkitd containerd check-dns; do
     if systemctl is-active --quiet "$svc" 2>/dev/null; then
         systemctl stop "$svc" 2>/dev/null || true
         _yellow "  已停止 ${svc}"
@@ -158,19 +160,26 @@ if command -v ip6tables >/dev/null 2>&1; then
     fi
     _yellow "  IPv6 ip6tables 规则已清理"
 fi
-# 清理持久化规则文件
-rm -f /etc/iptables/rules.v4 /etc/iptables/rules.v6 2>/dev/null || true
-rm -f /etc/sysconfig/iptables /etc/sysconfig/ip6tables 2>/dev/null || true
-# 停止并禁用 netfilter-persistent（iptables-persistent）
-if command -v systemctl >/dev/null 2>&1; then
-    if systemctl is-active --quiet netfilter-persistent 2>/dev/null; then
-        systemctl stop netfilter-persistent 2>/dev/null || true
+# Preserve host-owned persistent firewall files and services. Refresh an
+# existing snapshot from the now-clean live rules so only Containerd's rules
+# disappear after the next reboot.
+refresh_firewall_snapshot() {
+    local save_command="$1" snapshot="$2" temporary=""
+    [[ -f "$snapshot" ]] || return 0
+    command -v "$save_command" >/dev/null 2>&1 || return 0
+    temporary=$(mktemp "${snapshot}.containerd.XXXXXX" 2>/dev/null || true)
+    [[ -n "$temporary" ]] || return 0
+    if "$save_command" > "$temporary" 2>/dev/null; then
+        chmod --reference="$snapshot" "$temporary" 2>/dev/null || true
+        mv -f "$temporary" "$snapshot"
+    else
+        rm -f "$temporary"
     fi
-    if systemctl is-enabled --quiet netfilter-persistent 2>/dev/null; then
-        systemctl disable netfilter-persistent 2>/dev/null || true
-        _yellow "  已禁用 netfilter-persistent 服务"
-    fi
-fi
+}
+refresh_firewall_snapshot iptables-save /etc/iptables/rules.v4
+refresh_firewall_snapshot ip6tables-save /etc/iptables/rules.v6
+refresh_firewall_snapshot iptables-save /etc/sysconfig/iptables
+refresh_firewall_snapshot ip6tables-save /etc/sysconfig/ip6tables
 _green "  防火墙规则已清理"
 
 # ======== 6. 删除 nerdctl-full 二进制及配置 ========

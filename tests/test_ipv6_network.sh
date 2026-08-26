@@ -37,6 +37,10 @@ source <(extract_function containerd_ipv6_ula_candidate)
 source <(extract_function containerd_ipv6_ula_is_safe)
 # shellcheck disable=SC1090 # The test intentionally loads the CNI state guard.
 source <(extract_function containerd_ipv6_ula_state_matches_cni)
+# shellcheck disable=SC1090 # The test intentionally loads the public CNI state guard.
+source <(extract_function containerd_ipv6_managed_state_matches_cni)
+# shellcheck disable=SC1090 # The test intentionally loads the combined CNI state guard.
+source <(extract_function containerd_ipv6_state_matches_cni)
 # shellcheck disable=SC1090 # The test intentionally loads the CNI subnet reader.
 source <(extract_function containerd_cni_ipv6_subnet)
 # shellcheck disable=SC1090 # The test intentionally loads the ULA gateway helper.
@@ -200,6 +204,35 @@ if ! cmp -s "$CONTAINERD_CNI_IPV6_CONFIG" "$tmpdir/original-managed-cni.conflist
     printf 'unmanaged Containerd CNI configuration was overwritten\n' >&2
     exit 1
 fi
+
+# A public CNI network is safe to reuse only when its recorded subnet and
+# managed mode match. An untracked or stale state must never overwrite it.
+managed_public_subnet='2a14:6781:beef:200::/64'
+cat > "$CONTAINERD_CNI_IPV6_CONFIG" <<EOF
+{
+  "plugins": [{"ipam": {"ranges": [[{"subnet": "172.21.0.0/16"}], [{"subnet": "${managed_public_subnet}"}]]}}]
+}
+EOF
+printf 'managed\n' > "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_network_mode"
+printf '%s\n' "$managed_public_subnet" > "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_subnet"
+cp "$CONTAINERD_CNI_IPV6_CONFIG" "$tmpdir/original-public-cni.conflist"
+if ! create_ipv6_network '2a14:6781:a::9/48'; then
+    printf 'installer-managed public Containerd CNI network was not reused\n' >&2
+    exit 1
+fi
+if ! cmp -s "$CONTAINERD_CNI_IPV6_CONFIG" "$tmpdir/original-public-cni.conflist"; then
+    printf 'reusing Containerd public CNI unexpectedly rewrote its configuration\n' >&2
+    exit 1
+fi
+printf 'unknown\n' > "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_network_mode"
+if create_ipv6_network '2a14:6781:a::9/48'; then
+    printf 'untracked Containerd public CNI was incorrectly reused\n' >&2
+    exit 1
+fi
+if ! cmp -s "$CONTAINERD_CNI_IPV6_CONFIG" "$tmpdir/original-public-cni.conflist"; then
+    printf 'untracked Containerd public CNI configuration was overwritten\n' >&2
+    exit 1
+fi
 unset CONTAINERD_CNI_IPV6_CONFIG CONTAINERD_IPV6_STATE_DIR
 export PATH="$old_path"
 
@@ -242,6 +275,16 @@ if ! extract_function create_containerd_ula_ipv6_network | grep -Fq '"ipMasq": f
 fi
 if ! extract_function create_containerd_ula_ipv6_network | grep -Fq 'containerd_ipv6_ula_state_matches_cni'; then
     printf 'Containerd ULA reuse must be guarded by matching installer state\n' >&2
+    exit 1
+fi
+if grep -Fq 'buildkit buildkitd containerd check-dns nftables' "$repo_root/containerduninstall.sh" ||
+   grep -Fq 'rm -f /etc/iptables/rules.v4 /etc/iptables/rules.v6' "$repo_root/containerduninstall.sh"; then
+    printf 'Containerd uninstall must not disable global firewall services or remove global snapshots\n' >&2
+    exit 1
+fi
+if ! grep -Fq 'refresh_firewall_snapshot iptables-save /etc/iptables/rules.v4' "$repo_root/containerduninstall.sh" ||
+   ! grep -Fq 'refresh_firewall_snapshot ip6tables-save /etc/iptables/rules.v6' "$repo_root/containerduninstall.sh"; then
+    printf 'Containerd uninstall must refresh existing firewall snapshots after removing its rules\n' >&2
     exit 1
 fi
 if ! ndpresponder_image_matches_architecture arm64 arm64 ||

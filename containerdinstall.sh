@@ -1106,6 +1106,24 @@ containerd_ipv6_ula_state_matches_cni() {
     containerd_ipv6_ula_is_safe "$cni_subnet"
 }
 
+# A managed public CNI network may be reused only when both state files agree
+# with its single IPv6 subnet. Do not mistake a ULA NAT66 network for a public
+# allocation merely because a stale mode file says "managed".
+containerd_ipv6_managed_state_matches_cni() {
+    local recorded_mode="$1" recorded_subnet="$2" cni_subnet="$3"
+    [[ "$recorded_mode" == "managed" && "$recorded_subnet" == "$cni_subnet" ]] || return 1
+    is_public_ipv6 "${cni_subnet%%/*}"
+}
+
+containerd_ipv6_state_matches_cni() {
+    local recorded_mode="$1" recorded_subnet="$2" cni_subnet="$3"
+    case "$recorded_mode" in
+        nat) containerd_ipv6_ula_state_matches_cni "$recorded_mode" "$recorded_subnet" "$cni_subnet" ;;
+        managed) containerd_ipv6_managed_state_matches_cni "$recorded_mode" "$recorded_subnet" "$cni_subnet" ;;
+        *) return 1 ;;
+    esac
+}
+
 create_containerd_ula_ipv6_network() {
     local public_parent="$1" subnet gateway index existing_subnet recorded_mode recorded_subnet
     local cni_config="${CONTAINERD_CNI_IPV6_CONFIG:-/etc/cni/net.d/11-containerd-ipv6.conflist}"
@@ -1238,6 +1256,9 @@ create_ipv6_network() {
 
     local subnet_prefix="${CONTAINERD_IPV6_SUBNET_PREFIX:-$DEFAULT_CONTAINERD_IPV6_SUBNET_PREFIX}"
     local subnet_index="${CONTAINERD_IPV6_SUBNET_INDEX:-$DEFAULT_CONTAINERD_IPV6_SUBNET_INDEX}"
+    local cni_config="${CONTAINERD_CNI_IPV6_CONFIG:-/etc/cni/net.d/11-containerd-ipv6.conflist}"
+    local state_dir="${CONTAINERD_IPV6_STATE_DIR:-/usr/local/bin}"
+    local existing_subnet="" recorded_mode="" recorded_subnet=""
     local index_explicit=false
     [[ -n "${CONTAINERD_IPV6_SUBNET_INDEX+x}" ]] && index_explicit=true
     if [[ ! "$subnet_prefix" =~ ^[0-9]+$ ]] || (( subnet_prefix < 64 || subnet_prefix > 124 )); then
@@ -1246,6 +1267,24 @@ create_ipv6_network() {
     fi
     if [[ ! "$subnet_index" =~ ^[0-9]+$ ]]; then
         _red "Invalid CONTAINERD_IPV6_SUBNET_INDEX='${subnet_index}', expected a non-negative integer."
+        return 1
+    fi
+
+    # The filename is conventional rather than exclusive ownership. A
+    # re-install must not replace a CNI network unless the matching state files
+    # prove it was created by this installer. Reuse either managed public IPv6
+    # or ULA NAT66 so a working installation remains stable across reruns.
+    if [[ -e "$cni_config" || -L "$cni_config" ]]; then
+        existing_subnet=$(containerd_cni_ipv6_subnet "$cni_config" 2>/dev/null || true)
+        recorded_mode=$(tr -d '[:space:]' <"${state_dir}/containerd_ipv6_network_mode" 2>/dev/null || true)
+        recorded_subnet=$(tr -d '[:space:]' <"${state_dir}/containerd_ipv6_subnet" 2>/dev/null || true)
+        if containerd_ipv6_state_matches_cni "$recorded_mode" "$recorded_subnet" "$existing_subnet"; then
+            _green "Reusing installer-managed Containerd IPv6 CNI network: ${existing_subnet} (${recorded_mode})"
+            _green "复用安装器托管的 Containerd IPv6 CNI 网络：${existing_subnet}（${recorded_mode}）"
+            return 0
+        fi
+        _yellow "Existing Containerd IPv6 CNI network is not proven installer-managed; preserving its current configuration"
+        _yellow "现有 Containerd IPv6 CNI 网络无法确认由安装器管理，保留其当前配置"
         return 1
     fi
 
@@ -1273,11 +1312,12 @@ create_ipv6_network() {
         return 1
     fi
 
-    echo "$ipv6_cidr" > /usr/local/bin/containerd_ipv6_parent
-    echo "$prefix" > /usr/local/bin/containerd_ipv6_subnet
-    echo managed > /usr/local/bin/containerd_ipv6_network_mode
+    mkdir -p "$state_dir" || return 1
+    printf '%s\n' "$ipv6_cidr" > "${state_dir}/containerd_ipv6_parent"
+    printf '%s\n' "$prefix" > "${state_dir}/containerd_ipv6_subnet"
+    printf '%s\n' managed > "${state_dir}/containerd_ipv6_network_mode"
 
-    cat > /etc/cni/net.d/11-containerd-ipv6.conflist <<EOF
+    cat > "$cni_config" <<EOF
 {
   "cniVersion": "1.0.0",
   "name": "containerd-ipv6",
