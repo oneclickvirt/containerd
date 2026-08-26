@@ -28,45 +28,45 @@ extract_function() {
 }
 
 # shellcheck disable=SC1090 # The test intentionally loads one installer function.
-source <(extract_function derive_containerd_ipv6_subnet)
+eval "$(extract_function derive_containerd_ipv6_subnet)"
 # shellcheck disable=SC1090 # The test intentionally loads the host overlap helper.
-source <(extract_function cni_ipv6_subnet_overlaps_host)
+eval "$(extract_function cni_ipv6_subnet_overlaps_host)"
 # shellcheck disable=SC1090 # The test intentionally loads the precise route conflict helper.
-source <(extract_function cni_ipv6_subnet_conflicts_with_host_route)
+eval "$(extract_function cni_ipv6_subnet_conflicts_with_host_route)"
 # shellcheck disable=SC1090 # The test intentionally loads CNI conflict detection.
-source <(extract_function cni_ipv6_subnet_overlaps_existing)
+eval "$(extract_function cni_ipv6_subnet_overlaps_existing)"
 # shellcheck disable=SC1090 # The test intentionally loads the ULA candidate helper.
-source <(extract_function containerd_ipv6_ula_candidate)
+eval "$(extract_function containerd_ipv6_ula_candidate)"
 # shellcheck disable=SC1090 # The test intentionally loads ULA validation helpers.
-source <(extract_function containerd_ipv6_ula_is_safe)
+eval "$(extract_function containerd_ipv6_ula_is_safe)"
 # shellcheck disable=SC1090 # The test intentionally loads the CNI state guard.
-source <(extract_function containerd_ipv6_ula_state_matches_cni)
+eval "$(extract_function containerd_ipv6_ula_state_matches_cni)"
 # shellcheck disable=SC1090 # The test intentionally loads the public CNI state guard.
-source <(extract_function containerd_ipv6_managed_state_matches_cni)
+eval "$(extract_function containerd_ipv6_managed_state_matches_cni)"
 # shellcheck disable=SC1090 # The test intentionally loads the combined CNI state guard.
-source <(extract_function containerd_ipv6_state_matches_cni)
+eval "$(extract_function containerd_ipv6_state_matches_cni)"
 # shellcheck disable=SC1090 # The test intentionally loads the CNI subnet reader.
-source <(extract_function containerd_cni_ipv6_subnet)
+eval "$(extract_function containerd_cni_ipv6_subnet)"
 # shellcheck disable=SC1090 # The test intentionally loads the ULA gateway helper.
-source <(extract_function containerd_ipv6_ula_gateway)
+eval "$(extract_function containerd_ipv6_ula_gateway)"
 # shellcheck disable=SC1090 # The test intentionally loads the CNI reuse implementation.
-source <(extract_function create_containerd_ula_ipv6_network)
+eval "$(extract_function create_containerd_ula_ipv6_network)"
 # shellcheck disable=SC1090 # The test intentionally loads the IPv6 CNI creator.
-source <(extract_function create_ipv6_network)
+eval "$(extract_function create_ipv6_network)"
 # shellcheck disable=SC1090 # The test intentionally loads installer helpers.
-source <(extract_function is_public_ipv6)
+eval "$(extract_function is_public_ipv6)"
 # shellcheck disable=SC1090 # The test intentionally loads one installer function.
-source <(extract_function detect_global_ipv6_cidr)
+eval "$(extract_function detect_global_ipv6_cidr)"
 # shellcheck disable=SC1090 # The test intentionally loads IPv6 uplink helpers.
-source <(extract_function containerd_ipv6_uplink_interface)
+eval "$(extract_function containerd_ipv6_uplink_interface)"
 # shellcheck disable=SC1090 # The test intentionally loads IPv6 uplink helpers.
-source <(extract_function containerd_ipv6_uplink_supports_ndp)
+eval "$(extract_function containerd_ipv6_uplink_supports_ndp)"
 # shellcheck disable=SC1090 # The test intentionally loads IPv6 responder state setup.
-source <(extract_function configure_containerd_ipv6_ndp_state)
+eval "$(extract_function configure_containerd_ipv6_ndp_state)"
 # shellcheck disable=SC1090 # The test intentionally loads one installer helper.
-source <(extract_function ndpresponder_image_matches_architecture)
+eval "$(extract_function ndpresponder_image_matches_architecture)"
 # shellcheck disable=SC1090 # The test intentionally loads one installer helper.
-source <(extract_function resolve_ndpresponder_image)
+eval "$(extract_function resolve_ndpresponder_image)"
 
 tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/containerd-ipv6-test.XXXXXX")
 trap 'rm -rf -- "$tmpdir"' EXIT
@@ -221,7 +221,7 @@ for short_parent in '2a14:6781:a::9/120' '2a14:6781:a::8/127'; do
     fi
 done
 # shellcheck disable=SC1090 # Restore the real helper for the reuse checks below.
-source <(extract_function create_containerd_ula_ipv6_network)
+eval "$(extract_function create_containerd_ula_ipv6_network)"
 if ! cni_ipv6_subnet_overlaps_host "2a14:6781:a::1:0:0/96"; then
     printf 'connected host IPv6 route was not detected as a CNI overlap\n' >&2
     exit 1
@@ -494,7 +494,7 @@ fi
 # A broken remote ARM tag must not tear down a known-good responder before the
 # new image has passed architecture validation.
 # shellcheck disable=SC1090 # The test intentionally loads the installer function.
-source <(extract_function start_ndpresponder)
+eval "$(extract_function start_ndpresponder)"
 export CONTAINERD_IPV6_STATE_DIR="$tmpdir/ndp-state"
 # shellcheck disable=SC2218 # A later test mock must not intercept this real setup command.
 command mkdir -p "$CONTAINERD_IPV6_STATE_DIR"
