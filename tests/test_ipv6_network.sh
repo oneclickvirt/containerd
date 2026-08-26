@@ -172,7 +172,8 @@ if [[ "$(containerd_cni_ipv6_subnet "$tmpdir/known-cni.conflist")" != "$ula_cand
     exit 1
 fi
 ula_gateway=$(containerd_ipv6_ula_gateway "$ula_candidate")
-mkdir -p "$tmpdir/state"
+# shellcheck disable=SC2218 # A later test mock must not intercept this real setup command.
+command mkdir -p "$tmpdir/state"
 export CONTAINERD_CNI_IPV6_CONFIG="$tmpdir/managed-cni.conflist"
 export CONTAINERD_IPV6_STATE_DIR="$tmpdir/state"
 cat > "$CONTAINERD_CNI_IPV6_CONFIG" <<EOF
