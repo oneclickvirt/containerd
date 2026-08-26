@@ -119,7 +119,9 @@ EOF
 printf 'nat\n' > "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_network_mode"
 printf '%s\n' "$ula_candidate" > "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_subnet"
 cp "$CONTAINERD_CNI_IPV6_CONFIG" "$tmpdir/original-managed-cni.conflist"
+# shellcheck disable=SC2329 # Invoked by the dynamically sourced CNI helper.
 _green() { :; }
+# shellcheck disable=SC2329 # Invoked by the dynamically sourced CNI helper.
 _yellow() { :; }
 if ! create_containerd_ula_ipv6_network '2a14:6781:a::9/64'; then
     printf 'installer-managed Containerd ULA CNI network was not reused\n' >&2
@@ -170,7 +172,7 @@ if extract_function check_ipv6 | grep -Eq 'API_NET|curl[[:space:]]'; then
     printf 'check_ipv6 must not use an external address as a CNI subnet source\n' >&2
     exit 1
 fi
-if ! extract_function adapt_ipv6 | grep -Fq 'net.ipv6.conf.${interface}.accept_ra=2'; then
+if ! extract_function adapt_ipv6 | grep -Fq "net.ipv6.conf.\${interface}.accept_ra=2"; then
     printf 'Containerd IPv6 forwarding must preserve router advertisements on the uplink\n' >&2
     exit 1
 fi
@@ -194,6 +196,20 @@ if ! grep -Fq 'arm64) arch_tag="aarch64"' "$installer" ||
     printf 'Containerd must select the published aarch64 responder tag on ARM64\n' >&2
     exit 1
 fi
+start_ndpresponder_source=$(extract_function start_ndpresponder)
+if grep -Fq -- '--restart always' <<<"$start_ndpresponder_source"; then
+    printf 'Containerd ndpresponder must not retain an unconditional restart policy\n' >&2
+    exit 1
+fi
+if ! grep -Fq -- '--restart on-failure:3' <<<"$start_ndpresponder_source"; then
+    printf 'Containerd ndpresponder must use a bounded failure restart policy\n' >&2
+    exit 1
+fi
+if [[ "$(grep -Fc 'nerdctl rm -f ndpresponder' <<<"$start_ndpresponder_source")" -lt 2 ]]; then
+    printf 'Containerd must remove a failed ndpresponder after health verification\n' >&2
+    exit 1
+fi
+# shellcheck disable=SC2329 # Invoked by the dynamically sourced resolver.
 _yellow() { :; }
 ARCH_TYPE=arm64
 mock_build_succeeds=true
@@ -212,6 +228,7 @@ git() {
             ;;
     esac
 }
+# shellcheck disable=SC2329 # Invoked by the dynamically sourced resolver.
 nerdctl() {
     case "$1:$2" in
         pull:*)
@@ -242,6 +259,7 @@ nerdctl() {
             ;;
     esac
 }
+# shellcheck disable=SC2034 # Consumed by the dynamically sourced resolver.
 NDPRESPONDER_SOURCE_URL=https://example.invalid/ndpresponder.git
 if ! resolve_ndpresponder_image; then
     printf 'Containerd did not build a validated local responder after a bad registry architecture\n' >&2

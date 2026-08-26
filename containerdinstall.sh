@@ -1398,7 +1398,7 @@ start_ndpresponder() {
     nerdctl rm -f ndpresponder 2>/dev/null || true
 
     if nerdctl run -d \
-        --restart always \
+        --restart on-failure:3 \
         --cpus 0.02 \
         --memory 64m \
         --cap-drop=ALL \
@@ -1422,6 +1422,7 @@ start_ndpresponder() {
     else
         _yellow "ndpresponder start failed; IPv6 may require manual NDP configuration"
     fi
+    nerdctl rm -f ndpresponder 2>/dev/null || true
     return 1
 }
 
