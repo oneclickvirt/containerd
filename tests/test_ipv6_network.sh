@@ -60,9 +60,27 @@ if [ "${1:-}" = "-6" ] && [ "${2:-}" = "route" ]; then
     printf '%s\n' '2a14:6781:a::/64 dev eth0 proto kernel metric 256'
     exit 0
 fi
-printf '%s\n' '2: eth0    inet6 fd42::1/64 scope global'
-printf '%s\n' '2: eth0    inet6 2a14:6781:000a:0000::9/64 scope global tentative'
-printf '%s\n' '2: eth0    inet6 2a14:6781:000a:0000::10/64 scope global'
+case "${IPV6_TEST_SCENARIO:-default}" in
+    delegated)
+        case " $* " in
+            *" dev eth0 "*)
+                printf '%s\n' '2: vmbr0    inet6 2a14:7c0:1002:10f8::1/128 scope global'
+                ;;
+            *)
+                printf '%s\n' '2: vmbr0    inet6 2a14:7c0:1002:10f8::1/128 scope global'
+                printf '%s\n' '4: vmbr2    inet6 2a14:7c0:1002:10f8::1/38 scope global'
+                ;;
+        esac
+        ;;
+    tunnel)
+        printf '%s\n' '5: he-ipv6    inet6 2001:470:1f14:9::2/64 scope global'
+        ;;
+    *)
+        printf '%s\n' '2: eth0    inet6 fd42::1/64 scope global'
+        printf '%s\n' '2: eth0    inet6 2a14:6781:000a:0000::9/64 scope global tentative'
+        printf '%s\n' '2: eth0    inet6 2a14:6781:000a:0000::10/64 scope global'
+        ;;
+esac
 EOF
 chmod 700 "$tmpdir/ip"
 
@@ -74,6 +92,19 @@ if [[ "$detected" != "2a14:6781:000a:0000::10/64" ]]; then
     printf 'local public CIDR detection returned %q\n' "$detected" >&2
     exit 1
 fi
+export IPV6_TEST_SCENARIO=delegated
+detected=$(detect_global_ipv6_cidr eth0)
+if [[ "$detected" != '2a14:7c0:1002:10f8::1/38' ]]; then
+    printf 'delegated /38 was hidden by an uplink /128: %q\n' "$detected" >&2
+    exit 1
+fi
+export IPV6_TEST_SCENARIO=tunnel
+detected=$(detect_global_ipv6_cidr eth0)
+if [[ "$detected" != '2001:470:1f14:9::2/64' ]]; then
+    printf 'tunnel /64 detection returned %q\n' "$detected" >&2
+    exit 1
+fi
+unset IPV6_TEST_SCENARIO
 candidate=$(derive_containerd_ipv6_subnet "$host_cidr" 96 0 false)
 if derive_containerd_ipv6_subnet "$host_cidr" 96 0 true >/dev/null; then
     printf 'explicit host-containing CNI subnet was accepted\n' >&2

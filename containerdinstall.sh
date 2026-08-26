@@ -224,28 +224,33 @@ PY
 # ======== 检测公网 IPv6 ========
 detect_global_ipv6_cidr() {
     local dev="${1:-}"
-    local candidates=""
+    local candidates="" all_candidates=""
     if command -v ip >/dev/null 2>&1; then
         if [[ -n "$dev" ]]; then
             candidates=$(ip -o -6 addr show dev "$dev" scope global 2>/dev/null | awk '$0 !~ / tentative/ {print $4}' || true)
         fi
-        if [[ -z "$candidates" ]]; then
-            candidates=$(ip -o -6 addr show scope global 2>/dev/null | awk '$0 !~ / tentative/ {print $4}' || true)
-        fi
+        all_candidates=$(ip -o -6 addr show scope global 2>/dev/null | awk '$0 !~ / tentative/ {print $4}' || true)
     fi
 
-    local ordered=""
-    ordered=$(printf '%s\n' "$candidates" | awk 'NF {print length($0), $0}' | sort -nr | awk '{print $2}' || true)
-    local cidr addr
+    # Keep the selected device first for equal-length prefixes, but consider
+    # every locally bound address. A /128 on the default uplink must not hide
+    # a delegated /38 on a PVE bridge or a 6in4 tunnel.
+    candidates=$(printf '%s\n%s\n' "$candidates" "$all_candidates" | awk 'NF && !seen[$0]++')
+    local cidr addr prefix prefix_number best_cidr="" best_prefix=129
     while IFS= read -r cidr; do
         [[ -n "$cidr" ]] || continue
         addr="${cidr%%/*}"
-        if is_public_ipv6 "$addr"; then
-            printf '%s\n' "$cidr"
-            return 0
+        prefix="${cidr##*/}"
+        [[ "$prefix" =~ ^[0-9]+$ ]] || continue
+        prefix_number=$((10#$prefix))
+        (( prefix_number <= 128 )) || continue
+        if is_public_ipv6 "$addr" && (( prefix_number < best_prefix )); then
+            best_cidr="$cidr"
+            best_prefix=$prefix_number
         fi
-    done <<< "$ordered"
-    return 1
+    done <<< "$candidates"
+    [[ -n "$best_cidr" ]] || return 1
+    printf '%s\n' "$best_cidr"
 }
 
 check_ipv6() {
