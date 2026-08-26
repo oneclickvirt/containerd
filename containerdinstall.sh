@@ -1252,7 +1252,13 @@ create_ipv6_network() {
     local prefix=""
     prefix=$(derive_containerd_ipv6_subnet "$ipv6_cidr" "$subnet_prefix" "$subnet_index" "$index_explicit" || true)
     if [[ -z "$prefix" ]]; then
-        _red "Failed to derive a dedicated IPv6 CNI subnet from locally bound ${ipv6_cidr}."
+        # A host-only /128 is valid IPv6 connectivity but cannot supply a CNI
+        # child subnet. Keep outbound IPv6 available through an installer-owned
+        # ULA bridge and NAT66 rather than disabling IPv6 entirely.
+        if create_containerd_ula_ipv6_network "$ipv6_cidr"; then
+            return 0
+        fi
+        _red "Failed to derive a dedicated IPv6 CNI subnet from locally bound ${ipv6_cidr}, and ULA NAT66 fallback was unavailable."
         return 1
     fi
     if cni_ipv6_subnet_overlaps_host "$prefix"; then

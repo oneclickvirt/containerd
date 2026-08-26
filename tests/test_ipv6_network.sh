@@ -43,6 +43,8 @@ source <(extract_function containerd_cni_ipv6_subnet)
 source <(extract_function containerd_ipv6_ula_gateway)
 # shellcheck disable=SC1090 # The test intentionally loads the CNI reuse implementation.
 source <(extract_function create_containerd_ula_ipv6_network)
+# shellcheck disable=SC1090 # The test intentionally loads the IPv6 CNI creator.
+source <(extract_function create_ipv6_network)
 # shellcheck disable=SC1090 # The test intentionally loads installer helpers.
 source <(extract_function is_public_ipv6)
 # shellcheck disable=SC1090 # The test intentionally loads one installer function.
@@ -110,6 +112,33 @@ if derive_containerd_ipv6_subnet "$host_cidr" 96 0 true >/dev/null; then
     printf 'explicit host-containing CNI subnet was accepted\n' >&2
     exit 1
 fi
+
+# A routed host /128 proves IPv6 connectivity but cannot provide a CNI child
+# subnet. The installer must use its private ULA NAT66 fallback instead.
+containerd_nat66_parent=''
+# shellcheck disable=SC2329 # Invoked by the dynamically sourced CNI creator.
+create_containerd_ula_ipv6_network() {
+    containerd_nat66_parent="$1"
+    return 0
+}
+# shellcheck disable=SC2329 # Invoked by the dynamically sourced CNI creator.
+_yellow() { :; }
+# shellcheck disable=SC2329 # Invoked by the dynamically sourced CNI creator.
+_red() { :; }
+# shellcheck disable=SC2034 # Read by the dynamically sourced IPv6 CNI creator.
+CONTAINERD_IPV6_SUBNET_PREFIX=80
+# shellcheck disable=SC2034 # Read by the dynamically sourced IPv6 CNI creator.
+CONTAINERD_IPV6_SUBNET_INDEX=1
+if ! create_ipv6_network '2a14:6781:000a:0000::9/128'; then
+    printf 'host-only /128 did not fall back to Containerd ULA NAT66\n' >&2
+    exit 1
+fi
+if [[ "$containerd_nat66_parent" != '2a14:6781:000a:0000::9/128' ]]; then
+    printf 'Containerd NAT66 fallback used unexpected parent %q\n' "$containerd_nat66_parent" >&2
+    exit 1
+fi
+# shellcheck disable=SC1090 # Restore the real helper for the reuse checks below.
+source <(extract_function create_containerd_ula_ipv6_network)
 if ! cni_ipv6_subnet_overlaps_host "2a14:6781:a::1:0:0/96"; then
     printf 'connected host IPv6 route was not detected as a CNI overlap\n' >&2
     exit 1
