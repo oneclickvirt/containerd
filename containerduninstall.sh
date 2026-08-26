@@ -1,7 +1,7 @@
 #!/bin/bash
 # from
 # https://github.com/oneclickvirt/containerd
-# 2026.08.26
+# 2026.08.27
 # 完整卸载 containerd 环境及所有容器
 #
 # Supported environment variables (non-interactive mode / 支持的环境变量，可实现无交互卸载):
@@ -289,6 +289,8 @@ for f in \
     /usr/local/bin/containerd_ipv6_subnet \
     /usr/local/bin/containerd_ipv6_gateway \
     /usr/local/bin/containerd_ipv6_network_mode \
+    /usr/local/bin/containerd_ipv6_uplink \
+    /usr/local/bin/containerd_ipv6_ndp_required \
     /usr/local/bin/containerd_main_interface \
     /usr/local/bin/containerd_firewall_backend \
     /usr/local/bin/containerd_storage_driver \

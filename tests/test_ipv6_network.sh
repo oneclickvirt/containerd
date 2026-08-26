@@ -31,6 +31,10 @@ extract_function() {
 source <(extract_function derive_containerd_ipv6_subnet)
 # shellcheck disable=SC1090 # The test intentionally loads the host overlap helper.
 source <(extract_function cni_ipv6_subnet_overlaps_host)
+# shellcheck disable=SC1090 # The test intentionally loads the precise route conflict helper.
+source <(extract_function cni_ipv6_subnet_conflicts_with_host_route)
+# shellcheck disable=SC1090 # The test intentionally loads CNI conflict detection.
+source <(extract_function cni_ipv6_subnet_overlaps_existing)
 # shellcheck disable=SC1090 # The test intentionally loads the ULA candidate helper.
 source <(extract_function containerd_ipv6_ula_candidate)
 # shellcheck disable=SC1090 # The test intentionally loads ULA validation helpers.
@@ -53,6 +57,12 @@ source <(extract_function create_ipv6_network)
 source <(extract_function is_public_ipv6)
 # shellcheck disable=SC1090 # The test intentionally loads one installer function.
 source <(extract_function detect_global_ipv6_cidr)
+# shellcheck disable=SC1090 # The test intentionally loads IPv6 uplink helpers.
+source <(extract_function containerd_ipv6_uplink_interface)
+# shellcheck disable=SC1090 # The test intentionally loads IPv6 uplink helpers.
+source <(extract_function containerd_ipv6_uplink_supports_ndp)
+# shellcheck disable=SC1090 # The test intentionally loads IPv6 responder state setup.
+source <(extract_function configure_containerd_ipv6_ndp_state)
 # shellcheck disable=SC1090 # The test intentionally loads one installer helper.
 source <(extract_function ndpresponder_image_matches_architecture)
 # shellcheck disable=SC1090 # The test intentionally loads one installer helper.
@@ -62,8 +72,23 @@ tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/containerd-ipv6-test.XXXXXX")
 trap 'rm -rf -- "$tmpdir"' EXIT
 cat > "$tmpdir/ip" <<'EOF'
 #!/bin/sh
+if [ "${1:-}" = "-d" ] && [ "${2:-}" = "link" ]; then
+    case "${5:-}" in
+        he-ipv6) printf '%s\n' '5: he-ipv6: <POINTOPOINT,UP> mtu 1480 link/sit' ;;
+        *) printf '%s\n' '4: vmbr2: <BROADCAST,UP> mtu 1500 link/ether 02:00:00:00:00:01' ;;
+    esac
+    exit 0
+fi
+if [ "${1:-}" = "link" ] && [ "${2:-}" = "show" ]; then
+    printf '%s\n' '4: vmbr2: <BROADCAST,UP> mtu 1500 link/ether 02:00:00:00:00:01'
+    exit 0
+fi
 if [ "${1:-}" = "-6" ] && [ "${2:-}" = "route" ]; then
-    printf '%s\n' '2a14:6781:a::/64 dev eth0 proto kernel metric 256'
+    route_scenario=$IPV6_ROUTE_SCENARIO
+    case "$route_scenario" in
+        conflict) printf '%s\n' '2a14:6781:a::1:0:0/96 dev eth0 proto static metric 256' ;;
+        *) printf '%s\n' '2a14:6781:a::/64 dev eth0 proto kernel metric 256' ;;
+    esac
     exit 0
 fi
 case "${IPV6_TEST_SCENARIO:-default}" in
@@ -80,6 +105,12 @@ case "${IPV6_TEST_SCENARIO:-default}" in
         ;;
     tunnel)
         printf '%s\n' '5: he-ipv6    inet6 2001:470:1f14:9::2/64 scope global'
+        ;;
+    narrow120)
+        printf '%s\n' '2: eth0    inet6 2a14:6781:a::9/120 scope global'
+        ;;
+    narrow127)
+        printf '%s\n' '2: eth0    inet6 2a14:6781:a::8/127 scope global'
         ;;
     *)
         printf '%s\n' '2: eth0    inet6 fd42::1/64 scope global'
@@ -108,6 +139,42 @@ export IPV6_TEST_SCENARIO=tunnel
 detected=$(detect_global_ipv6_cidr eth0)
 if [[ "$detected" != '2001:470:1f14:9::2/64' ]]; then
     printf 'tunnel /64 detection returned %q\n' "$detected" >&2
+    exit 1
+fi
+uplink=$(containerd_ipv6_uplink_interface)
+if [[ "$uplink" != he-ipv6 ]] || containerd_ipv6_uplink_supports_ndp "$uplink"; then
+    printf 'tunnel IPv6 uplink was not recognized as non-Ethernet: %q\n' "$uplink" >&2
+    exit 1
+fi
+export CONTAINERD_IPV6_STATE_DIR="$tmpdir/state"
+command mkdir -p "$CONTAINERD_IPV6_STATE_DIR"
+printf '%s\n' manual > "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_network_mode"
+if ! configure_containerd_ipv6_ndp_state || \
+   [[ "$(tr -d '[:space:]' < "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_ndp_required")" != false ]]; then
+    printf 'tunnel IPv6 incorrectly required a Containerd NDP responder\n' >&2
+    exit 1
+fi
+export IPV6_TEST_SCENARIO=delegated
+uplink=$(containerd_ipv6_uplink_interface)
+if [[ "$uplink" != vmbr2 ]] || ! containerd_ipv6_uplink_supports_ndp "$uplink"; then
+    printf 'PVE delegated IPv6 uplink was not recognized as Ethernet: %q\n' "$uplink" >&2
+    exit 1
+fi
+if ! configure_containerd_ipv6_ndp_state || \
+   [[ "$(tr -d '[:space:]' < "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_ndp_required")" != true ]]; then
+    printf 'PVE Ethernet IPv6 did not require a Containerd NDP responder\n' >&2
+    exit 1
+fi
+export IPV6_TEST_SCENARIO=narrow120
+detected=$(detect_global_ipv6_cidr eth0)
+if [[ "$detected" != '2a14:6781:a::9/120' ]]; then
+    printf 'routed /120 detection returned %q\n' "$detected" >&2
+    exit 1
+fi
+export IPV6_TEST_SCENARIO=narrow127
+detected=$(detect_global_ipv6_cidr eth0)
+if [[ "$detected" != '2a14:6781:a::8/127' ]]; then
+    printf 'routed /127 detection returned %q\n' "$detected" >&2
     exit 1
 fi
 unset IPV6_TEST_SCENARIO
@@ -141,12 +208,33 @@ if [[ "$containerd_nat66_parent" != '2a14:6781:000a:0000::9/128' ]]; then
     printf 'Containerd NAT66 fallback used unexpected parent %q\n' "$containerd_nat66_parent" >&2
     exit 1
 fi
+for short_parent in '2a14:6781:a::9/120' '2a14:6781:a::8/127'; do
+    containerd_nat66_parent=''
+    if ! create_ipv6_network "$short_parent"; then
+        printf 'short IPv6 prefix did not fall back to Containerd ULA NAT66: %q\n' "$short_parent" >&2
+        exit 1
+    fi
+    if [[ "$containerd_nat66_parent" != "$short_parent" ]]; then
+        printf 'Containerd NAT66 fallback used unexpected short parent %q for %q\n' "$containerd_nat66_parent" "$short_parent" >&2
+        exit 1
+    fi
+done
 # shellcheck disable=SC1090 # Restore the real helper for the reuse checks below.
 source <(extract_function create_containerd_ula_ipv6_network)
 if ! cni_ipv6_subnet_overlaps_host "2a14:6781:a::1:0:0/96"; then
     printf 'connected host IPv6 route was not detected as a CNI overlap\n' >&2
     exit 1
 fi
+if cni_ipv6_subnet_conflicts_with_host_route "2a14:6781:a::1:0:0/96"; then
+    printf 'parent IPv6 route incorrectly blocked a host-disjoint CNI child\n' >&2
+    exit 1
+fi
+export IPV6_ROUTE_SCENARIO=conflict
+if ! cni_ipv6_subnet_conflicts_with_host_route "2a14:6781:a::1:0:0/96"; then
+    printf 'equal IPv6 route was not detected as a CNI conflict\n' >&2
+    exit 1
+fi
+unset IPV6_ROUTE_SCENARIO
 ula_candidate=$(containerd_ipv6_ula_candidate 0)
 if cni_ipv6_subnet_overlaps_host "$ula_candidate"; then
     printf 'isolated Containerd ULA unexpectedly overlaps the host route\n' >&2
@@ -174,6 +262,21 @@ fi
 ula_gateway=$(containerd_ipv6_ula_gateway "$ula_candidate")
 # shellcheck disable=SC2218 # A later test mock must not intercept this real setup command.
 command mkdir -p "$tmpdir/state"
+# shellcheck disable=SC2329 # Invoked by the dynamically sourced CNI creator.
+_green() { :; }
+# shellcheck disable=SC2329 # Invoked by the dynamically sourced CNI creator.
+_yellow() { :; }
+export CONTAINERD_CNI_IPV6_CONFIG="$tmpdir/onlink-cni.conflist"
+export CONTAINERD_IPV6_STATE_DIR="$tmpdir/state"
+if ! create_ipv6_network '2a14:6781:a::9/64'; then
+    printf 'host-disjoint child of an on-link IPv6 /64 was not accepted by Containerd CNI\n' >&2
+    exit 1
+fi
+if [[ "$(tr -d '[:space:]' <"$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_network_mode")" != managed ]] || \
+   [[ "$(containerd_cni_ipv6_subnet "$CONTAINERD_CNI_IPV6_CONFIG")" != 2a14:6781:a:0:1::/80 ]]; then
+    printf 'Containerd on-link IPv6 /64 did not retain a managed public CNI child\n' >&2
+    exit 1
+fi
 export CONTAINERD_CNI_IPV6_CONFIG="$tmpdir/managed-cni.conflist"
 export CONTAINERD_IPV6_STATE_DIR="$tmpdir/state"
 cat > "$CONTAINERD_CNI_IPV6_CONFIG" <<EOF
@@ -266,8 +369,12 @@ if extract_function check_ipv6 | grep -Eq 'API_NET|curl[[:space:]]'; then
     printf 'check_ipv6 must not use an external address as a CNI subnet source\n' >&2
     exit 1
 fi
-if ! extract_function adapt_ipv6 | grep -Fq "net.ipv6.conf.\${interface}.accept_ra=2"; then
+if ! extract_function adapt_ipv6 | grep -Fq "net.ipv6.conf.\${uplink}.accept_ra=2"; then
     printf 'Containerd IPv6 forwarding must preserve router advertisements on the uplink\n' >&2
+    exit 1
+fi
+if extract_function adapt_ipv6 | grep -Eq 'update_sysctl[[:space:]].*proxy_ndp'; then
+    printf 'Containerd IPv6 setup must not change global proxy_ndp state\n' >&2
     exit 1
 fi
 if ! extract_function create_containerd_ula_ipv6_network | grep -Fq '"ipMasq": false'; then
@@ -307,6 +414,11 @@ if grep -Fq -- '--restart always' <<<"$start_ndpresponder_source"; then
 fi
 if ! grep -Fq -- '--restart on-failure:3' <<<"$start_ndpresponder_source"; then
     printf 'Containerd ndpresponder must use a bounded failure restart policy\n' >&2
+    exit 1
+fi
+if ! grep -Fq 'containerd_ipv6_ndp_required' "$repo_root/scripts/onecontainerd.sh" || \
+   ! grep -Fq 'ndp_required" != "false"' "$repo_root/scripts/onecontainerd.sh"; then
+    printf 'Containerd creation must not require ndpresponder for NAT66 or non-Ethernet IPv6\n' >&2
     exit 1
 fi
 if [[ "$(grep -Fc 'nerdctl rm -f ndpresponder' <<<"$start_ndpresponder_source")" -lt 2 ]]; then
@@ -382,6 +494,24 @@ fi
 # new image has passed architecture validation.
 # shellcheck disable=SC1090 # The test intentionally loads the installer function.
 source <(extract_function start_ndpresponder)
+export CONTAINERD_IPV6_STATE_DIR="$tmpdir/ndp-state"
+command mkdir -p "$CONTAINERD_IPV6_STATE_DIR"
+# shellcheck disable=SC2329 # Invoked by the dynamically sourced responder starter.
+_green() { :; }
+printf '%s\n' nat > "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_network_mode"
+if ! start_ndpresponder; then
+    printf 'Containerd NAT66 unnecessarily required ndpresponder\n' >&2
+    exit 1
+fi
+printf '%s\n' manual > "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_network_mode"
+printf '%s\n' false > "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_ndp_required"
+if ! start_ndpresponder; then
+    printf 'Containerd tunnel IPv6 unnecessarily required ndpresponder\n' >&2
+    exit 1
+fi
+printf '%s\n' managed > "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_network_mode"
+printf '%s\n' true > "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_ndp_required"
+printf '%s\n' eth0 > "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_uplink"
 # shellcheck disable=SC2329 # Invoked by the dynamically sourced installer function.
 _yellow() { :; }
 # shellcheck disable=SC2034 # Read by the dynamically sourced installer function.

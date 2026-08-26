@@ -1,7 +1,7 @@
 #!/bin/bash
 # from
 # https://github.com/oneclickvirt/containerd
-# 2026.08.26
+# 2026.08.27
 #
 # Supported environment variables (non-interactive mode / 支持的环境变量，可实现无交互安装):
 #   noninteractive=true          - Use defaults for prompts / 使用默认值跳过交互提示
@@ -251,6 +251,63 @@ detect_global_ipv6_cidr() {
     done <<< "$candidates"
     [[ -n "$best_cidr" ]] || return 1
     printf '%s\n' "$best_cidr"
+}
+
+# Use the IPv6 default route rather than the IPv4 primary NIC for NDP. When a
+# host has no default route entry yet, match the complete selected CIDR so a
+# delegated PVE bridge or tunnel remains distinguishable from a /128 uplink.
+containerd_ipv6_uplink_interface() {
+    local uplink selected
+    uplink=$(ip -6 route show default 2>/dev/null | awk '
+        /^default / {
+            for (i = 1; i < NF; i++) {
+                if ($i == "dev") {
+                    print $(i + 1)
+                    exit
+                }
+            }
+        }
+    ')
+    if [[ -n "$uplink" ]] && ip link show dev "$uplink" >/dev/null 2>&1; then
+        printf '%s\n' "$uplink"
+        return 0
+    fi
+
+    selected="${IPV6_CIDR:-}"
+    if [[ "$selected" != */* ]]; then
+        selected=$(detect_global_ipv6_cidr "${interface:-}" 2>/dev/null || true)
+    fi
+    [[ "$selected" == */* ]] || return 1
+    uplink=$(ip -6 -o addr show scope global 2>/dev/null | awk -v cidr="$selected" '$4 == cidr {print $2; exit}')
+    [[ -n "$uplink" ]] || return 1
+    printf '%s\n' "$uplink"
+}
+
+containerd_ipv6_uplink_supports_ndp() {
+    local uplink="$1" link_info
+    [[ -n "$uplink" ]] || return 1
+    link_info=$(ip -d link show dev "$uplink" 2>/dev/null || ip link show dev "$uplink" 2>/dev/null || true)
+    grep -q 'link/ether' <<<"$link_info"
+}
+
+configure_containerd_ipv6_ndp_state() {
+    local network_mode uplink ndp_required=false state_dir
+    state_dir="${CONTAINERD_IPV6_STATE_DIR:-/usr/local/bin}"
+    network_mode=""
+    if [[ -f "${state_dir}/containerd_ipv6_network_mode" ]]; then
+        network_mode=$(tr -d '[:space:]' <"${state_dir}/containerd_ipv6_network_mode" 2>/dev/null || true)
+    fi
+    uplink=$(containerd_ipv6_uplink_interface 2>/dev/null || true)
+    if [[ -z "$uplink" ]]; then
+        _yellow "Could not determine the IPv6 uplink; independent IPv6 will remain disabled"
+        return 1
+    fi
+    if [[ "$network_mode" != "nat" ]] && containerd_ipv6_uplink_supports_ndp "$uplink"; then
+        ndp_required=true
+    fi
+    printf '%s\n' "$uplink" > "${state_dir}/containerd_ipv6_uplink"
+    printf '%s\n' "$ndp_required" > "${state_dir}/containerd_ipv6_ndp_required"
+    return 0
 }
 
 check_ipv6() {
@@ -878,16 +935,17 @@ start_services() {
 
 # ======== 配置 IPv6 内核参数及防火墙规则 ========
 adapt_ipv6() {
+    local uplink
     _yellow "Configuring IPv6 kernel parameters..."
-    update_sysctl "net.ipv6.conf.all.forwarding=1"
-    update_sysctl "net.ipv6.conf.default.proxy_ndp=1"
-    update_sysctl "net.ipv6.conf.all.proxy_ndp=1"
-    if [[ -n "$interface" ]]; then
-        # Forwarding otherwise disables ordinary RA processing on Linux. Keep
-        # the physical uplink's SLAAC default route alive after this setup.
-        update_sysctl "net.ipv6.conf.${interface}.accept_ra=2"
-        update_sysctl "net.ipv6.conf.${interface}.proxy_ndp=1"
+    uplink=$(containerd_ipv6_uplink_interface 2>/dev/null || true)
+    if [[ -z "$uplink" ]]; then
+        _yellow "Could not determine the IPv6 uplink; leaving host IPv6 settings unchanged"
+        return 1
     fi
+    update_sysctl "net.ipv6.conf.all.forwarding=1"
+    # Forwarding otherwise disables ordinary RA processing on Linux. Keep the
+    # actual IPv6 uplink's SLAAC route alive without changing global proxy_ndp.
+    update_sysctl "net.ipv6.conf.${uplink}.accept_ra=2"
     sysctl --system >/dev/null 2>&1 || true
 
     local ipv6_subnet="" ipv4_subnet="172.21.0.0/16" ipv6_mode=""
@@ -983,9 +1041,10 @@ raise SystemExit(1)
 PY
 }
 
-# A public child of an on-link host prefix is not an independent CNI network.
-# Netavark/CNI rejects the overlap even when the child has no assigned host
-# address, so compare both local addresses and connected routes.
+# This strict overlap check is used when selecting an isolated ULA NAT66
+# subnet. Public CNI children use cni_ipv6_subnet_conflicts_with_host_route:
+# a child of the selected parent route is intentional and becomes a more
+# specific bridge route, while an equal or more-specific existing route is not.
 cni_ipv6_subnet_overlaps_host() {
     local subnet="$1"
     command -v python3 >/dev/null 2>&1 || return 2
@@ -1021,6 +1080,36 @@ base = ipaddress.IPv6Network("fd42:5339:296f:1e00::/56")
 index = int(sys.argv[1])
 print(ipaddress.IPv6Network((int(base.network_address) + (index << 64), 64)))
 PY
+}
+
+# A connected or routed parent prefix is not itself a conflict for a CNI
+# child. The bridge plugin installs the child as a more-specific route, which
+# is how PVE delegated prefixes and normal NDP-backed /64s remain usable.
+# Do not overwrite a route already equal to, or more specific than, that child.
+cni_ipv6_subnet_conflicts_with_host_route() {
+    local subnet="$1"
+    command -v python3 >/dev/null 2>&1 || return 2
+    ip -6 route show table all 2>/dev/null | awk '$1 ~ /^[0-9A-Fa-f:]+\/[0-9]+$/ {print $1}' | python3 -c '
+import ipaddress
+import sys
+
+try:
+    candidate = ipaddress.IPv6Network(sys.argv[1], strict=False)
+except ValueError:
+    raise SystemExit(2)
+
+for raw in sys.stdin:
+    raw = raw.strip()
+    if not raw:
+        continue
+    try:
+        route = ipaddress.IPv6Network(raw, strict=False)
+    except ValueError:
+        continue
+    if route.version == 6 and (route == candidate or route.subnet_of(candidate)):
+        raise SystemExit(0)
+raise SystemExit(1)
+' "$subnet"
 }
 
 containerd_ipv6_ula_gateway() {
@@ -1300,11 +1389,14 @@ create_ipv6_network() {
         _red "Failed to derive a dedicated IPv6 CNI subnet from locally bound ${ipv6_cidr}, and ULA NAT66 fallback was unavailable."
         return 1
     fi
-    if cni_ipv6_subnet_overlaps_host "$prefix"; then
+    # A host route covering the parent is expected and safe: CNI installs the
+    # host-disjoint child as a more-specific route. Fall back only when another
+    # route already owns this exact child or a still more-specific portion.
+    if cni_ipv6_subnet_conflicts_with_host_route "$prefix"; then
         if create_containerd_ula_ipv6_network "$ipv6_cidr"; then
             return 0
         fi
-        _red "Could not find a host-disjoint ULA subnet for Containerd IPv6"
+        _red "Could not find a safe ULA subnet after an existing route conflicted with Containerd IPv6"
         return 1
     fi
     if cni_ipv6_subnet_overlaps_existing "$prefix"; then
@@ -1434,9 +1526,35 @@ resolve_ndpresponder_image() {
 }
 
 start_ndpresponder() {
-    if [[ "$(cat /usr/local/bin/containerd_ipv6_network_mode 2>/dev/null || true)" == "nat" ]]; then
+    local network_mode ndp_required uplink state_dir
+    state_dir="${CONTAINERD_IPV6_STATE_DIR:-/usr/local/bin}"
+    network_mode=""
+    ndp_required=""
+    if [[ -f "${state_dir}/containerd_ipv6_network_mode" ]]; then
+        network_mode=$(tr -d '[:space:]' <"${state_dir}/containerd_ipv6_network_mode" 2>/dev/null || true)
+    fi
+    if [[ -f "${state_dir}/containerd_ipv6_ndp_required" ]]; then
+        ndp_required=$(tr -d '[:space:]' <"${state_dir}/containerd_ipv6_ndp_required" 2>/dev/null || true)
+    fi
+    if [[ "$network_mode" == "nat" || "$ndp_required" == "false" ]]; then
+        if [[ "$network_mode" != "nat" ]]; then
+            _green "Containerd routed IPv6 uses a non-Ethernet uplink; NDP responder is not required"
+            return 0
+        fi
         _green "Containerd IPv6 uses ULA NAT66; NDP responder is not required"
         return 0
+    fi
+    if [[ "$ndp_required" != "true" ]]; then
+        _yellow "Containerd IPv6 NDP state is incomplete; refusing to guess an IPv4 uplink"
+        return 1
+    fi
+    uplink=""
+    if [[ -f "${state_dir}/containerd_ipv6_uplink" ]]; then
+        uplink=$(tr -d '[:space:]' <"${state_dir}/containerd_ipv6_uplink" 2>/dev/null || true)
+    fi
+    if [[ -z "$uplink" ]]; then
+        _yellow "Containerd IPv6 NDP state is missing its IPv6 uplink"
+        return 1
     fi
     _yellow "Starting NDP responder for IPv6..."
     local ndp_status ndp_logs ndp_image
@@ -1459,7 +1577,7 @@ start_ndpresponder() {
         --volume /var/lib/cni/networks:/var/lib/cni/networks:ro \
         --name ndpresponder \
         "${ndp_image}" \
-        -i "${interface}" -C containerd-ipv6 2>/dev/null; then
+        -i "${uplink}" -C containerd-ipv6 2>/dev/null; then
         for _ndp_attempt in 1 2 3; do
             sleep 1
             ndp_status=$(nerdctl inspect -f '{{.State.Status}}' ndpresponder 2>/dev/null || true)
@@ -1682,6 +1800,7 @@ main() {
     if [[ "$IPV6_ENABLED" == true ]] && \
        create_ipv6_network "$IPV6_CIDR" && \
        adapt_ipv6 && \
+       configure_containerd_ipv6_ndp_state && \
        start_ndpresponder; then
         echo "true" > /usr/local/bin/containerd_ipv6_enabled
     else

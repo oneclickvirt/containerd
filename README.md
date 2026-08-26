@@ -196,9 +196,9 @@ bash scripts/containerd_manage.sh version-check debian
 ## 网络说明
 
 - **IPv4**：通过 `-p` 端口映射（bridge 模式，CNI `containerd-net`）
-- **出口网卡**：默认通过路由自动检测，也可用 `CONTAINERD_MAIN_INTERFACE=eth0` 指定，供 IPv4 NAT 和 IPv6 NDP 使用
-- **IPv6（独立地址）**：安装时只接受宿主机本地绑定的公网 IPv6 父前缀，不把外部出口检测结果伪造成 `/64`。默认从父前缀切出 `/80` CNI 子网，并跳过包含任意宿主机地址的候选子网；也会拒绝与其他 CNI 配置重叠的子网。
-- **NDP**：`containerd-ipv6` 使用 CNI `host-local` 租约，NDP responder 只读监听 `/var/lib/cni/networks/containerd-ipv6`，不依赖 Docker API。官方镜像不可拉取、架构错误或 ARMv7 无发布标签时，安装脚本会浅克隆 `NDPRESPONDER_SOURCE_URL` 后从本地上下文构建并重新校验镜像，构建失败时不会替换已有 responder。只有 CNI 配置创建、NDP responder 启动和存活检查均成功时，独立 IPv6 才会启用；否则容器仍使用 IPv4 CNI 网络。
+- **出口网卡**：IPv4 NAT 沿用主出口；IPv6 NDP 按 IPv6 默认路由识别，缺少默认路由时才回退到已选 IPv6 前缀所在接口。PVE 上联 `/128` 与委派 `/38` 并存时，委派前缀仍可作为地址池。
+- **IPv6（独立地址）**：安装时只接受宿主机本地绑定的公网 IPv6 父前缀，不把外部出口检测结果伪造成 `/64`。默认从父前缀切出 `/80` CNI 子网，并跳过包含任意宿主机地址的候选子网；父前缀的覆盖路由本身不会阻止 CNI 使用其不含宿主地址的子网，CNI 会安装更精确路由，因此 PVE 委派前缀和常规 NDP-backed `/64` 均可继续分配公网独立地址。单个 `/128`、过窄前缀或已有相同/更精确路由时会使用隔离 ULA NAT66，保留 IPv6 出站但不分配公网独立地址；发现其他 CNI 配置冲突时则保留原配置并停止独立 IPv6 设置。
+- **NDP**：`containerd-ipv6` 使用 CNI `host-local` 租约，NDP responder 只读监听 `/var/lib/cni/networks/containerd-ipv6`，不依赖 Docker API。仅以太网 IPv6 上联需要它；NAT66 及 SIT、6in4、ip6tnl 等非以太网隧道不要求 responder，容器创建不会因此退回 IPv4。官方镜像不可拉取、架构错误或 ARMv7 无发布标签时，安装脚本会浅克隆 `NDPRESPONDER_SOURCE_URL` 后从本地上下文构建并重新校验镜像，构建失败时不会替换已有 responder。需要 NDP 的场景只有 CNI 配置创建、responder 启动和存活检查均成功时才启用独立 IPv6。
 - **DNS 保活**：通过 `check-dns.service` 系统服务持续检测 DNS 可用性
 
 ## Stargazers over time

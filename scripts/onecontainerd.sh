@@ -1,7 +1,7 @@
 #!/bin/bash
 # from
 # https://github.com/oneclickvirt/containerd
-# 2026.08.26
+# 2026.08.27
 
 # Usage:
 # ./onecontainerd.sh <name> <cpu> <memory_mb> <password> <sshport> <startport> <endport> [independent_ipv6:y/n] [system] [disk_gb]
@@ -310,12 +310,21 @@ fi
 # ======== IPv6 检测 ========
 IPV6_ENABLED=false
 containerd_ipv6_ready() {
+    local network_mode ndp_required
     [[ -f /usr/local/bin/containerd_ipv6_enabled ]] || return 1
     [[ "$(cat /usr/local/bin/containerd_ipv6_enabled 2>/dev/null)" == "true" ]] || return 1
     [[ -s /usr/local/bin/containerd_ipv6_subnet ]] || return 1
     [[ -f /etc/cni/net.d/11-containerd-ipv6.conflist ]] || return 1
     command -v nerdctl >/dev/null 2>&1 || return 1
-    if [[ "$(cat /usr/local/bin/containerd_ipv6_network_mode 2>/dev/null || true)" != "nat" ]]; then
+    network_mode=$(tr -d '[:space:]' </usr/local/bin/containerd_ipv6_network_mode 2>/dev/null || true)
+    # Older installations have no NDP state file, so retain their existing
+    # responder requirement. New NAT66 and routed non-Ethernet installations
+    # explicitly record false and must not be downgraded to IPv4.
+    ndp_required=true
+    if [[ -s /usr/local/bin/containerd_ipv6_ndp_required ]]; then
+        ndp_required=$(tr -d '[:space:]' </usr/local/bin/containerd_ipv6_ndp_required 2>/dev/null || true)
+    fi
+    if [[ "$network_mode" != "nat" && "$ndp_required" != "false" ]]; then
         [[ "$(nerdctl inspect -f '{{.State.Status}}' ndpresponder 2>/dev/null || true)" == "running" ]] || return 1
     fi
     return 0
