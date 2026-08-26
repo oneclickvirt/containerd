@@ -147,6 +147,7 @@ if [[ "$uplink" != he-ipv6 ]] || containerd_ipv6_uplink_supports_ndp "$uplink"; 
     exit 1
 fi
 export CONTAINERD_IPV6_STATE_DIR="$tmpdir/state"
+# shellcheck disable=SC2218 # A later test mock must not intercept this real setup command.
 command mkdir -p "$CONTAINERD_IPV6_STATE_DIR"
 printf '%s\n' manual > "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_network_mode"
 if ! configure_containerd_ipv6_ndp_state || \
@@ -495,6 +496,7 @@ fi
 # shellcheck disable=SC1090 # The test intentionally loads the installer function.
 source <(extract_function start_ndpresponder)
 export CONTAINERD_IPV6_STATE_DIR="$tmpdir/ndp-state"
+# shellcheck disable=SC2218 # A later test mock must not intercept this real setup command.
 command mkdir -p "$CONTAINERD_IPV6_STATE_DIR"
 # shellcheck disable=SC2329 # Invoked by the dynamically sourced responder starter.
 _green() { :; }
