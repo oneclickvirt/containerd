@@ -1,7 +1,7 @@
 #!/bin/bash
 # from
 # https://github.com/oneclickvirt/containerd
-# 2026.06.03
+# 2026.08.30
 
 set -uo pipefail
 
@@ -11,7 +11,9 @@ _yellow() { echo -e "\033[33m\033[01m$*\033[0m"; }
 _blue() { echo -e "\033[36m\033[01m$*\033[0m"; }
 
 export DEBIAN_FRONTEND=noninteractive
-export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+if [[ "${ONECLICKVIRT_TESTING:-}" != "1" ]]; then
+    export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+fi
 
 usage() {
     cat <<'EOF'

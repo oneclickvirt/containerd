@@ -1,7 +1,7 @@
 #!/bin/bash
 # from
 # https://github.com/oneclickvirt/containerd
-# 2026.08.27
+# 2026.08.30
 #
 # Supported environment variables (non-interactive mode / 支持的环境变量，可实现无交互安装):
 #   noninteractive=true          - Use defaults for prompts / 使用默认值跳过交互提示
@@ -253,11 +253,24 @@ detect_global_ipv6_cidr() {
     printf '%s\n' "$best_cidr"
 }
 
-# Use the IPv6 default route rather than the IPv4 primary NIC for NDP. When a
-# host has no default route entry yet, match the complete selected CIDR so a
-# delegated PVE bridge or tunnel remains distinguishable from a /128 uplink.
+# Prefer the interface that owns the selected public CIDR. A PVE host can have
+# a management /128 and a delegated /38 on different bridges while its IPv6
+# default route still points at the management bridge. Only fall back to the
+# default route when the selected CIDR cannot be mapped to a live interface.
 containerd_ipv6_uplink_interface() {
-    local uplink selected
+    local uplink selected selected_if
+    selected="${IPV6_CIDR:-}"
+    if [[ "$selected" != */* ]]; then
+        selected=$(detect_global_ipv6_cidr "${interface:-}" 2>/dev/null || true)
+    fi
+    if [[ "$selected" == */* ]]; then
+        selected_if=$(ip -6 -o addr show scope global 2>/dev/null | awk -v cidr="$selected" '$4 == cidr {print $2; exit}')
+        if [[ -n "$selected_if" ]] && ip link show dev "$selected_if" >/dev/null 2>&1; then
+            printf '%s\n' "$selected_if"
+            return 0
+        fi
+    fi
+
     uplink=$(ip -6 route show default 2>/dev/null | awk '
         /^default / {
             for (i = 1; i < NF; i++) {
@@ -273,14 +286,7 @@ containerd_ipv6_uplink_interface() {
         return 0
     fi
 
-    selected="${IPV6_CIDR:-}"
-    if [[ "$selected" != */* ]]; then
-        selected=$(detect_global_ipv6_cidr "${interface:-}" 2>/dev/null || true)
-    fi
-    [[ "$selected" == */* ]] || return 1
-    uplink=$(ip -6 -o addr show scope global 2>/dev/null | awk -v cidr="$selected" '$4 == cidr {print $2; exit}')
-    [[ -n "$uplink" ]] || return 1
-    printf '%s\n' "$uplink"
+    return 1
 }
 
 containerd_ipv6_uplink_supports_ndp() {
@@ -307,6 +313,9 @@ configure_containerd_ipv6_ndp_state() {
     fi
     printf '%s\n' "$uplink" > "${state_dir}/containerd_ipv6_uplink"
     printf '%s\n' "$ndp_required" > "${state_dir}/containerd_ipv6_ndp_required"
+    if [[ "$ndp_required" != true ]]; then
+        rm -f "${state_dir}/containerd_ipv6_ndp_ready" "${state_dir}/containerd_ipv6_ndp_ready_required"
+    fi
     return 0
 }
 
@@ -1464,6 +1473,24 @@ ndpresponder_image_matches_architecture() {
     return 1
 }
 
+ndpresponder_supports_ready_file() {
+    local image="$1" help_output
+    help_output=$(nerdctl run --rm "$image" --help 2>&1 || true)
+    grep -Eq -- '(^|[[:space:],])--ready-file([[:space:],=]|$)' <<<"$help_output"
+}
+
+ndpresponder_image_supports_required_features() {
+    if [[ "${NDPRESPONDER_READY_FILE_REQUIRED:-false}" != true ]]; then
+        return 0
+    fi
+    if ndpresponder_supports_ready_file "$1"; then
+        return 0
+    fi
+    _yellow "Responder image does not support --ready-file; a source build is required before enabling Ethernet NDP IPv6"
+    _yellow "Responder 镜像不支持 --ready-file；以太网 NDP IPv6 需从源码构建新版程序"
+    return 1
+}
+
 # Resolve a responder image before touching the existing container. Published
 # tags cover amd64 and arm64; ARMv7 falls back to a native source build.
 resolve_ndpresponder_image() {
@@ -1485,7 +1512,8 @@ resolve_ndpresponder_image() {
         _yellow "Pulling ndpresponder image: ${registry_image}"
         if nerdctl pull "${registry_image}" 2>/dev/null; then
             image_arch=$(nerdctl image inspect --format '{{.Architecture}}' "${registry_image}" 2>/dev/null || true)
-            if ndpresponder_image_matches_architecture "$ARCH_TYPE" "$image_arch"; then
+            if ndpresponder_image_matches_architecture "$ARCH_TYPE" "$image_arch" && \
+               ndpresponder_image_supports_required_features "$registry_image"; then
                 NDPRESPONDER_IMAGE="$registry_image"
                 return 0
             fi
@@ -1519,6 +1547,11 @@ resolve_ndpresponder_image() {
     rm -rf -- "$source_dir"
     if ! ndpresponder_image_matches_architecture "$ARCH_TYPE" "$image_arch"; then
         _yellow "Locally built responder image ${source_image} is ${image_arch:-unknown}, expected ${ARCH_TYPE}; preserving any existing responder"
+        return 1
+    fi
+    if ! ndpresponder_image_supports_required_features "$source_image"; then
+        _yellow "The source-built responder is missing the required readiness capability; preserving any existing responder"
+        _yellow "源码构建的 responder 缺少所需的就绪能力，将保留已有 responder"
         return 1
     fi
     NDPRESPONDER_IMAGE="$source_image"
@@ -1557,9 +1590,14 @@ start_ndpresponder() {
         return 1
     fi
     _yellow "Starting NDP responder for IPv6..."
-    local ndp_status ndp_logs ndp_image
+    local ndp_status ndp_logs ndp_image ready_file
 
-    mkdir -p /var/lib/cni/networks
+    mkdir -p /var/lib/cni/networks "$state_dir"
+    ready_file="${state_dir}/containerd_ipv6_ndp_ready"
+    : > "$ready_file"
+    chmod 600 "$ready_file"
+    rm -f "${state_dir}/containerd_ipv6_ndp_ready_required"
+    NDPRESPONDER_READY_FILE_REQUIRED=true
     if ! resolve_ndpresponder_image; then
         return 1
     fi
@@ -1575,23 +1613,27 @@ start_ndpresponder() {
         --cap-add=NET_ADMIN \
         --network host \
         --volume /var/lib/cni/networks:/var/lib/cni/networks:ro \
+        --volume "$ready_file:/run/ndpresponder-ready" \
         --name ndpresponder \
         "${ndp_image}" \
-        -i "${uplink}" -C containerd-ipv6 2>/dev/null; then
-        for _ndp_attempt in 1 2 3; do
+        -i "${uplink}" -C containerd-ipv6 --ready-file /run/ndpresponder-ready 2>/dev/null; then
+        for ((_ndp_attempt = 1; _ndp_attempt <= 35; _ndp_attempt++)); do
             sleep 1
             ndp_status=$(nerdctl inspect -f '{{.State.Status}}' ndpresponder 2>/dev/null || true)
-            if [[ "$ndp_status" == "running" ]]; then
-                _green "NDP responder started and is reading CNI IPv6 leases"
+            if [[ "$ndp_status" == "running" && -s "$ready_file" ]]; then
+                printf '%s\n' true > "${state_dir}/containerd_ipv6_ndp_ready_required"
+                _green "NDP responder started, is reading CNI IPv6 leases, and is ready for neighbor discovery"
                 return 0
             fi
         done
         ndp_logs=$(nerdctl logs --tail 20 ndpresponder 2>&1 || true)
-        _yellow "ndpresponder exited immediately: ${ndp_logs}"
+        _yellow "ndpresponder did not become ready: ${ndp_logs}"
     else
         _yellow "ndpresponder start failed; IPv6 may require manual NDP configuration"
     fi
     nerdctl rm -f ndpresponder 2>/dev/null || true
+    : > "$ready_file" 2>/dev/null || true
+    rm -f "${state_dir}/containerd_ipv6_ndp_ready_required"
     return 1
 }
 

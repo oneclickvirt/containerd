@@ -1,7 +1,7 @@
 #!/bin/bash
 # from
 # https://github.com/oneclickvirt/containerd
-# 2026.08.27
+# 2026.08.30
 
 # Usage:
 # ./onecontainerd.sh <name> <cpu> <memory_mb> <password> <sshport> <startport> <endport> [independent_ipv6:y/n] [system] [disk_gb]
@@ -13,10 +13,12 @@ _green() { echo -e "\033[32m\033[01m$*\033[0m"; }
 _yellow() { echo -e "\033[33m\033[01m$*\033[0m"; }
 _blue() { echo -e "\033[36m\033[01m$*\033[0m"; }
 export DEBIAN_FRONTEND=noninteractive
-export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+if [[ "${ONECLICKVIRT_TESTING:-}" != "1" ]]; then
+    export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+fi
 SCRIPT_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-if [ "$(id -u)" != "0" ]; then
+if [[ "${ONECLICKVIRT_TESTING:-}" != "1" ]] && [ "$(id -u)" != "0" ]; then
     _red "This script must be run as root" 1>&2
     exit 1
 fi
@@ -194,12 +196,17 @@ SYS="${CMD[0]}"
 [[ -n $SYS ]] || SYS="${CMD[4]}"
 [[ -n $SYS ]] || SYS="${CMD[5]}"
 [[ -n $SYS ]] || SYS="${CMD[6]}"
-for ((int = 0; int < ${#REGEX[@]}; int++)); do
-    if [[ $(echo "$SYS" | tr '[:upper:]' '[:lower:]') =~ ${REGEX[int]} ]]; then
-        SYSTEM="${RELEASE[int]}"
-        [[ -n $SYSTEM ]] && break
-    fi
-done
+if [[ "${ONECLICKVIRT_TESTING:-}" == "1" ]]; then
+    SYSTEM="${CONTAINERD_TEST_HOST_SYSTEM:-Debian}"
+    int=0
+else
+    for ((int = 0; int < ${#REGEX[@]}; int++)); do
+        if [[ $(echo "$SYS" | tr '[:upper:]' '[:lower:]') =~ ${REGEX[int]} ]]; then
+            SYSTEM="${RELEASE[int]}"
+            [[ -n $SYSTEM ]] && break
+        fi
+    done
+fi
 if [[ -z "$SYSTEM" ]]; then
     _red "ERROR: The script does not support the current system!"
     exit 1
@@ -274,7 +281,7 @@ check_storage_driver() {
         btrfs_support="N"
         if [ "$disk" != "0" ]; then
             _yellow "Current snapshotter ($storage_driver) does not support disk size limitation, ignoring disk parameter"
-            _yellow "当前快照器（$storage_driver）不支持硬盘大小限制，忽略硬盘参数"
+            _yellow "当前快照器（${storage_driver}）不支持硬盘大小限制，忽略硬盘参数"
             disk="0"
         fi
     fi
@@ -299,7 +306,11 @@ check_ipv4() {
     IPV4=$(ip route get 8.8.8.8 2>/dev/null | awk 'NR==1{for(i=1;i<=NF;i++) if($i=="src") print $(i+1)}' || true)
 }
 
-check_ipv4
+if [[ "${ONECLICKVIRT_TESTING:-}" == "1" ]]; then
+    IPV4="${CONTAINERD_TEST_IPV4:-192.0.2.1}"
+else
+    check_ipv4
+fi
 
 # ======== 检查 nerdctl ========
 if ! command -v nerdctl >/dev/null 2>&1 && [[ ! -x /usr/local/bin/nerdctl ]]; then
@@ -310,22 +321,32 @@ fi
 # ======== IPv6 检测 ========
 IPV6_ENABLED=false
 containerd_ipv6_ready() {
-    local network_mode ndp_required
-    [[ -f /usr/local/bin/containerd_ipv6_enabled ]] || return 1
-    [[ "$(cat /usr/local/bin/containerd_ipv6_enabled 2>/dev/null)" == "true" ]] || return 1
-    [[ -s /usr/local/bin/containerd_ipv6_subnet ]] || return 1
-    [[ -f /etc/cni/net.d/11-containerd-ipv6.conflist ]] || return 1
+    local network_mode ndp_required ready_required state_dir cni_config
+    state_dir="${CONTAINERD_IPV6_STATE_DIR:-/usr/local/bin}"
+    cni_config="${CONTAINERD_CNI_IPV6_CONFIG:-/etc/cni/net.d/11-containerd-ipv6.conflist}"
+    [[ -f "${state_dir}/containerd_ipv6_enabled" ]] || return 1
+    [[ "$(cat "${state_dir}/containerd_ipv6_enabled" 2>/dev/null)" == "true" ]] || return 1
+    [[ -s "${state_dir}/containerd_ipv6_subnet" ]] || return 1
+    [[ -f "$cni_config" ]] || return 1
     command -v nerdctl >/dev/null 2>&1 || return 1
-    network_mode=$(tr -d '[:space:]' </usr/local/bin/containerd_ipv6_network_mode 2>/dev/null || true)
+    network_mode=$(tr -d '[:space:]' <"${state_dir}/containerd_ipv6_network_mode" 2>/dev/null || true)
     # Older installations have no NDP state file, so retain their existing
     # responder requirement. New NAT66 and routed non-Ethernet installations
     # explicitly record false and must not be downgraded to IPv4.
     ndp_required=true
-    if [[ -s /usr/local/bin/containerd_ipv6_ndp_required ]]; then
-        ndp_required=$(tr -d '[:space:]' </usr/local/bin/containerd_ipv6_ndp_required 2>/dev/null || true)
+    if [[ -s "${state_dir}/containerd_ipv6_ndp_required" ]]; then
+        ndp_required=$(tr -d '[:space:]' <"${state_dir}/containerd_ipv6_ndp_required" 2>/dev/null || true)
     fi
     if [[ "$network_mode" != "nat" && "$ndp_required" != "false" ]]; then
         [[ "$(nerdctl inspect -f '{{.State.Status}}' ndpresponder 2>/dev/null || true)" == "running" ]] || return 1
+        # New installers write this marker only after ndpresponder has opened
+        # its capture socket. Missing markers retain compatibility with an
+        # already-working installation created by an older release.
+        ready_required=false
+        if [[ -s "${state_dir}/containerd_ipv6_ndp_ready_required" ]]; then
+            ready_required=$(tr -d '[:space:]' <"${state_dir}/containerd_ipv6_ndp_ready_required" 2>/dev/null || true)
+        fi
+        [[ "$ready_required" != true || -s "${state_dir}/containerd_ipv6_ndp_ready" ]] || return 1
     fi
     return 0
 }
@@ -373,118 +394,60 @@ image_ref_exists() {
 repair_oci_archive_platform() {
     local tar_gz_path="$1"
     local platform="$2"
-    local arch
-    arch="${platform##*/}"  # "linux/amd64" -> "amd64"
-
-    _yellow "Checking and repairing OCI archive platform field (arch: ${arch})..."
-
-    # Validate the gzip file first
-    if ! gzip -t "$tar_gz_path" 2>/dev/null; then
-        _yellow "gzip integrity check failed, skipping repair"
+    local platform_path arch variant=""
+    if [[ "$platform" != linux/* ]]; then
+        _yellow "Unsupported image platform: $platform"
         return 1
     fi
-    if ! tar -tzf "$tar_gz_path" >/dev/null 2>&1; then
-        _yellow "tar listing failed, skipping repair"
-        return 1
+    platform_path="${platform#linux/}"
+    arch="${platform_path%%/*}"
+    if [[ "$platform_path" == */* ]]; then
+        variant="${platform_path#*/}"
+        if [[ "$variant" == */* || -z "$variant" ]]; then
+            _yellow "Unsupported image platform variant: $platform"
+            return 1
+        fi
     fi
-
-    # Check if python3 is available
+    local validator="${CONTAINERD_ARCHIVE_VALIDATOR:-${SCRIPT_SOURCE_DIR}/validate_image_archive.py}"
+    local validator_tmp=""
+    if [[ ! -s "$validator" ]]; then
+        validator="/root/scripts/validate_image_archive.py"
+    fi
+    if [[ ! -s "$validator" ]]; then
+        validator="/tmp/oneclickvirt-validate-image-archive.py"
+        validator_tmp="${validator}.tmp.$$"
+        local validator_url="https://raw.githubusercontent.com/oneclickvirt/containerd/main/scripts/validate_image_archive.py"
+        if ! curl -fsSL --connect-timeout 10 --max-time 60 "$validator_url" -o "$validator_tmp" || \
+           [[ ! -s "$validator_tmp" ]]; then
+            rm -f "$validator_tmp"
+            _yellow "Image archive validator is unavailable; refusing to load an unverified archive"
+            return 1
+        fi
+        mv -f "$validator_tmp" "$validator"
+        chmod 700 "$validator"
+    fi
     if ! command -v python3 >/dev/null 2>&1; then
-        _yellow "python3 not available, skipping OCI repair"
+        _yellow "python3 not available; refusing to load an unverified archive"
         return 1
     fi
-
-    # Inline Python: patch index.json (OCI) or manifest.json (Docker) inside the gzipped tar.
-    python3 - "$tar_gz_path" "$arch" <<'PYREPAIR' 2>/dev/null || return 1
-import json, tarfile, io, sys, os, gzip, tempfile, shutil
-
-tar_gz_path, arch = sys.argv[1], sys.argv[2]
-platform_obj = {"architecture": arch, "os": "linux"}
-
-# Decompress to a temp tar
-with gzip.open(tar_gz_path, "rb") as f_in:
-    raw_tar = f_in.read()
-
-with tarfile.open(fileobj=io.BytesIO(raw_tar)) as tf:
-    names = tf.getnames()
-
-needs_repair = False
-
-if "index.json" in names:
-    with tarfile.open(fileobj=io.BytesIO(raw_tar)) as tf:
-        idx_data = json.loads(tf.extractfile("index.json").read())
-    for m in idx_data.get("manifests", []):
-        if "platform" not in m:
-            m["platform"] = platform_obj
-            needs_repair = True
-    if not needs_repair:
-        sys.exit(0)  # Already has platform, nothing to do
-    fixed_idx = json.dumps(idx_data, separators=(",", ":")).encode() + b"\n"
-
-    out_bio = io.BytesIO()
-    with tarfile.open(fileobj=out_bio, mode="w") as out:
-        with tarfile.open(fileobj=io.BytesIO(raw_tar)) as tf:
-            for member in tf.getmembers():
-                if member.name == "index.json":
-                    member.size = len(fixed_idx)
-                    out.addfile(member, io.BytesIO(fixed_idx))
-                else:
-                    out.addfile(member, tf.extractfile(member))
-    out_bio.seek(0)
-    new_raw_tar = out_bio.read()
-
-elif "manifest.json" in names:
-    with tarfile.open(fileobj=io.BytesIO(raw_tar)) as tf:
-        mf_data = json.loads(tf.extractfile("manifest.json").read())
-    for entry in mf_data:
-        if "platform" not in entry:
-            entry["platform"] = {"os": "linux", "architecture": arch}
-            needs_repair = True
-    if not needs_repair:
-        sys.exit(0)
-    fixed_mf = json.dumps(mf_data, separators=(",", ":")).encode() + b"\n"
-
-    out_bio = io.BytesIO()
-    with tarfile.open(fileobj=out_bio, mode="w") as out:
-        with tarfile.open(fileobj=io.BytesIO(raw_tar)) as tf:
-            for member in tf.getmembers():
-                if member.name == "manifest.json":
-                    member.size = len(fixed_mf)
-                    out.addfile(member, io.BytesIO(fixed_mf))
-                else:
-                    out.addfile(member, tf.extractfile(member))
-    out_bio.seek(0)
-    new_raw_tar = out_bio.read()
-else:
-    sys.exit(1)  # Unknown format
-
-# Recompress
-with gzip.open(tar_gz_path, "wb") as f_out:
-    f_out.write(new_raw_tar)
-
-print(f"[OK] Platform field injected: {platform_obj}")
-PYREPAIR
-    local ret=$?
-    if [[ $ret -eq 0 ]]; then
-        _green "OCI archive platform field repaired (${platform})"
-        return 0
+    local validator_args=(--archive "$tar_gz_path" --arch "$arch")
+    if [[ -n "$variant" ]]; then
+        validator_args+=(--variant "$variant")
     fi
-    return 1
+    python3 "$validator" "${validator_args[@]}"
 }
 
 load_image_archive() {
     local tar_path="$1"
     local platform="$2"
 
-    # Step 0: Validate the archive
-    if ! gzip -t "$tar_path" 2>/dev/null; then
-        _yellow "gzip integrity check failed for ${tar_path}"
+    # Validate and repair platform metadata before handing the archive to the
+    # runtime. A malformed descriptor must never reach nerdctl: older versions
+    # turn a null digest into a misleading blobs/sha256/null lookup.
+    if ! repair_oci_archive_platform "$tar_path" "$platform"; then
+        _yellow "Image archive validation failed for ${tar_path}; refusing to load it"
+        return 1
     fi
-
-    # Step 1: Attempt to repair platform info in index.json / manifest.json.
-    # This fixes the "no unpack platforms defined" error in containerd/nerdctl v2.3.1+
-    # caused by docker save omitting the platform field from OCI index.json.
-    repair_oci_archive_platform "$tar_path" "$platform" || true
 
     # Step 2: Try nerdctl load with explicit --platform
     if nerdctl load --platform="$platform" --input="$tar_path"; then
@@ -591,6 +554,10 @@ download_and_load_image() {
 
 # ======== 持久化 iptables/ip6tables 规则 ========
 persist_iptables_rules() {
+    if [[ "${ONECLICKVIRT_TESTING:-}" == "1" ]]; then
+        _green "iptables/ip6tables persistence skipped in test mode"
+        return 0
+    fi
     mkdir -p /etc/iptables 2>/dev/null || true
     if command -v iptables-save >/dev/null 2>&1; then
         iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
@@ -619,26 +586,63 @@ download_ssh_scripts() {
     local sys_type="$2"
 
     local base_url="${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/containerd/main/scripts"
+    local ssh_script_dir="${CONTAINERD_SSH_SCRIPT_DIR:-$SCRIPT_SOURCE_DIR}"
     local local_script=""
     local target_script=""
 
     if [[ "$sys_type" == "alpine" ]]; then
-        local_script="${SCRIPT_SOURCE_DIR}/ssh_sh.sh"
+        local_script="${ssh_script_dir}/ssh_sh.sh"
         target_script="/tmp/ssh_sh.sh"
     else
-        local_script="${SCRIPT_SOURCE_DIR}/ssh_bash.sh"
+        local_script="${ssh_script_dir}/ssh_bash.sh"
         target_script="/tmp/ssh_bash.sh"
     fi
 
+    rm -f -- "$target_script"
     if [[ -s "$local_script" ]]; then
-        cp "$local_script" "$target_script"
+        cp "$local_script" "$target_script" || return 1
     else
-        curl -sL --connect-timeout 10 --max-time 30 \
-            "${base_url}/$(basename "$target_script")" -o "$target_script" 2>/dev/null || true
+        if ! curl -fsSL --connect-timeout 10 --max-time 30 \
+            "${base_url}/$(basename "$target_script")" -o "$target_script" 2>/dev/null; then
+            rm -f -- "$target_script"
+            _yellow "SSH initialization script is unavailable; verifying the image's built-in SSH service"
+            return 0
+        fi
     fi
 
-    if [[ -s "$target_script" ]]; then
-        nerdctl cp "$target_script" "${cname}:/$(basename "$target_script")" 2>/dev/null || true
+    if [[ ! -s "$target_script" ]]; then
+        rm -f -- "$target_script"
+        _yellow "SSH initialization script is empty; verifying the image's built-in SSH service"
+        return 0
+    fi
+    if ! nerdctl cp "$target_script" "${cname}:/$(basename "$target_script")" 2>/dev/null; then
+        rm -f -- "$target_script"
+        return 1
+    fi
+    rm -f -- "$target_script"
+}
+
+set_container_root_password() {
+    local cname="$1"
+    local sys_type="$2"
+    local password="$3"
+    # shellcheck disable=SC2016
+    if [[ "$sys_type" == "alpine" ]]; then
+        nerdctl exec "$cname" sh -c 'printf "%s:%s\n" root "$1" | chpasswd' _ "$password"
+    else
+        nerdctl exec "$cname" bash -c 'printf "%s:%s\n" root "$1" | chpasswd' _ "$password"
+    fi
+}
+
+ensure_container_sshd() {
+    local cname="$1"
+    local sys_type="$2"
+    local command_line
+    command_line='command -v sshd >/dev/null 2>&1 || exit 1; (pgrep -x sshd >/dev/null 2>&1 || pidof sshd >/dev/null 2>&1 || service ssh start >/dev/null 2>&1 || service sshd start >/dev/null 2>&1 || /usr/sbin/sshd); pgrep -x sshd >/dev/null 2>&1 || pidof sshd >/dev/null 2>&1'
+    if [[ "$sys_type" == "alpine" ]]; then
+        nerdctl exec "$cname" sh -c "$command_line"
+    else
+        nerdctl exec "$cname" bash -c "$command_line"
     fi
 }
 
@@ -692,12 +696,28 @@ check_port_conflicts() {
 }
 
 # ======== 主逻辑 ========
+container_created=false
+build_succeeded=false
+success_record_tmp=""
+cleanup_failed_container() {
+    local status=$?
+    if [[ -n "$success_record_tmp" ]]; then
+        rm -f -- "$success_record_tmp"
+    fi
+    if [[ "$container_created" == true && "$build_succeeded" != true ]] && command -v nerdctl >/dev/null 2>&1; then
+        nerdctl rm -f "$name" >/dev/null 2>&1 || true
+    fi
+    return "$status"
+}
+trap cleanup_failed_container EXIT
+
 main() {
     _blue "Creating container: name=${name} cpu=${cpu} memory=${memory}MB system=${system}"
     _blue "SSH port: ${sshport}  port range: ${startport}-${endport}  IPv6: ${independent_ipv6}"
 
     check_container_name_available
     check_port_conflicts
+    rm -f -- "$name" || return 1
 
     # 下载/加载镜像
     download_and_load_image "$system"
@@ -746,11 +766,15 @@ main() {
         "${ipv6_env_args[@]}" \
         -e ROOT_PASSWORD="${passwd}" \
         "${image_name}"; then
+        if nerdctl ps -a --format '{{.Names}}' 2>/dev/null | grep -Fxq "$name"; then
+            container_created=true
+        fi
         _red "Failed to create container ${name}"
-        exit 1
+        return 1
     fi
+    container_created=true
 
-    _green "Container ${name} created successfully"
+    _green "Container ${name} started; completing required configuration"
     sleep 3
 
     # ======== 补充防火墙 NAT/FORWARD 规则（防止系统未自动添加） ========
@@ -814,38 +838,46 @@ main() {
     fi
 
     # 下载并执行 SSH 初始化脚本
-    download_ssh_scripts "$name" "$system"
+    if ! download_ssh_scripts "$name" "$system"; then
+        _red "Failed to install the SSH initialization script in ${name}"
+        return 1
+    fi
 
     if [[ "$system" == "alpine" ]]; then
         if nerdctl exec "${name}" test -f /ssh_sh.sh 2>/dev/null; then
-            nerdctl exec "${name}" sh /ssh_sh.sh "$passwd" 2>/dev/null || true
+            nerdctl exec "${name}" sh /ssh_sh.sh "$passwd" 2>/dev/null || return 1
         else
             # 镜像内置 entrypoint 处理 SSH，无需外部脚本
             _yellow "ssh_sh.sh not found in container, relying on built-in entrypoint"
         fi
-        # shellcheck disable=SC2016
-        nerdctl exec "${name}" sh -c 'printf "%s:%s\n" root "$1" | chpasswd' _ "$passwd" 2>/dev/null || true
     else
         if nerdctl exec "${name}" test -f /ssh_bash.sh 2>/dev/null; then
-            nerdctl exec "${name}" bash /ssh_bash.sh "$passwd" 2>/dev/null || true
+            nerdctl exec "${name}" bash /ssh_bash.sh "$passwd" 2>/dev/null || return 1
         else
             _yellow "ssh_bash.sh not found in container, relying on built-in entrypoint"
         fi
-        # shellcheck disable=SC2016
-        nerdctl exec "${name}" bash -c 'printf "%s:%s\n" root "$1" | chpasswd' _ "$passwd" 2>/dev/null || true
     fi
 
-    # 尝试启动 sshd（防止某些镜像 entrypoint 未自动启动）
-    if [[ "$system" == "alpine" ]]; then
-        nerdctl exec "${name}" sh -c "command -v sshd && sshd" 2>/dev/null || true
-    else
-        nerdctl exec "${name}" bash -c "command -v sshd && (service ssh start 2>/dev/null || service sshd start 2>/dev/null || /usr/sbin/sshd 2>/dev/null)" 2>/dev/null || true
+    if ! set_container_root_password "$name" "$system" "$passwd"; then
+        _red "Failed to set the root password in ${name}"
+        return 1
+    fi
+    if ! ensure_container_sshd "$name" "$system"; then
+        _red "sshd did not become ready in ${name}"
+        return 1
     fi
 
     sleep 2
 
-    echo "$name $sshport $passwd $cpu $memory $startport $endport $disk" >>"$name"
-    cat "$name"
+    local record="$name $sshport $passwd $cpu $memory $startport $endport $disk"
+    success_record_tmp="${name}.tmp.$$"
+    if ! printf '%s\n' "$record" >"$success_record_tmp" || ! mv -f -- "$success_record_tmp" "$name"; then
+        _red "Failed to write the success record for ${name}"
+        return 1
+    fi
+    success_record_tmp=""
+    build_succeeded=true
+    printf '%s\n' "$record"
 
     # ======== 显示连接信息 ========
     echo

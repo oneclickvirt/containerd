@@ -4,10 +4,16 @@ on:
   push:
     paths:
       - '**/*.sh'
+      - 'scripts/validate_image_archive.py'
+      - 'tests/test_image_archive.py'
+      - '.github/workflows/containerd_build.yml'
       - '.github/workflows/ipv6-regression.yml'
   pull_request:
     paths:
       - '**/*.sh'
+      - 'scripts/validate_image_archive.py'
+      - 'tests/test_image_archive.py'
+      - '.github/workflows/containerd_build.yml'
       - '.github/workflows/ipv6-regression.yml'
   workflow_dispatch:
 
@@ -51,3 +57,6 @@ jobs:
         run: |
           set -euo pipefail
           bash tests/test_ipv6_network.sh
+          python3 tests/test_image_archive.py
+          bash tests/test_creation_rollback.sh
+          bash tests/test_batch_creation_rollback.sh

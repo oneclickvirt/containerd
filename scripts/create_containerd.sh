@@ -1,7 +1,7 @@
 #!/bin/bash
 # from
 # https://github.com/oneclickvirt/containerd
-# 2026.03.01
+# 2026.08.30
 
 # 批量开设 containerd 容器脚本
 # 交互式或无交互创建多个 Linux 容器，记录到 ctlog 日志文件
@@ -77,7 +77,9 @@ normalize_container_system() {
     esac
 }
 export DEBIAN_FRONTEND=noninteractive
-export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+if [[ "${ONECLICKVIRT_TESTING:-}" != "1" ]]; then
+    export PATH="/usr/local/bin:/usr/bin:/bin:$PATH"
+fi
 SCRIPT_SOURCE_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 DEFAULT_CREATE_COUNT=1
@@ -181,47 +183,68 @@ generate_password() {
     printf '%s\n' "${password:0:32}"
 }
 
-parse_args "$@"
+if [[ "${ONECLICKVIRT_TESTING:-}" != "1" ]]; then
+    parse_args "$@"
 
-if [ "$(id -u)" != "0" ]; then
-    _red "This script must be run as root" 1>&2
-    exit 1
+    if [ "$(id -u)" != "0" ]; then
+        _red "This script must be run as root" 1>&2
+        exit 1
+    fi
+
+    # ======== 切换到 /root ========
+    cd /root || exit 1
 fi
-
-# ======== 切换到 /root ========
-cd /root || exit 1
 
 # ======== 检查依赖 ========
 pre_check() {
+    if [[ "${ONECLICKVIRT_TESTING:-}" == "1" ]]; then
+        command -v nerdctl >/dev/null 2>&1 || return 1
+        [[ -s "${SCRIPT_SOURCE_DIR}/onecontainerd.sh" ]] || return 1
+        [[ -s "${SCRIPT_SOURCE_DIR}/validate_image_archive.py" ]] || return 1
+        return 0
+    fi
     if ! command -v nerdctl >/dev/null 2>&1 && [[ ! -x /usr/local/bin/nerdctl ]]; then
         _yellow "nerdctl not found, running containerdinstall.sh..."
         if [[ -f /root/containerdinstall.sh ]]; then
-            bash /root/containerdinstall.sh
+            bash /root/containerdinstall.sh || return 1
         else
-            bash <(curl -sL "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/containerd/main/containerdinstall.sh")
+            bash <(curl -fsSL --connect-timeout 10 --max-time 60 "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/containerd/main/containerdinstall.sh") || return 1
         fi
     fi
 
     # 优先使用当前仓库中的脚本，避免本地改动调试时落回远端旧版本。
     if [[ -f "${SCRIPT_SOURCE_DIR}/onecontainerd.sh" ]]; then
-        mkdir -p /root/scripts
-        cp "${SCRIPT_SOURCE_DIR}/onecontainerd.sh" /root/scripts/onecontainerd.sh
-        for helper_script in ssh_bash.sh ssh_sh.sh; do
+        mkdir -p /root/scripts || return 1
+        cp "${SCRIPT_SOURCE_DIR}/onecontainerd.sh" /root/scripts/onecontainerd.sh || return 1
+        for helper_script in ssh_bash.sh ssh_sh.sh validate_image_archive.py; do
             if [[ -f "${SCRIPT_SOURCE_DIR}/${helper_script}" ]]; then
-                cp "${SCRIPT_SOURCE_DIR}/${helper_script}" "/root/scripts/${helper_script}"
-                chmod +x "/root/scripts/${helper_script}"
+                cp "${SCRIPT_SOURCE_DIR}/${helper_script}" "/root/scripts/${helper_script}" || return 1
+                chmod +x "/root/scripts/${helper_script}" || return 1
             fi
         done
-        chmod +x /root/scripts/onecontainerd.sh
+        chmod +x /root/scripts/onecontainerd.sh || return 1
     elif [[ ! -f /root/scripts/onecontainerd.sh ]]; then
-        curl -sL --connect-timeout 10 --max-time 60 \
+        curl -fsSL --connect-timeout 10 --max-time 60 \
             "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/containerd/main/scripts/onecontainerd.sh" \
-            -o /root/scripts/onecontainerd.sh
+            -o /root/scripts/onecontainerd.sh || return 1
         if [[ ! -s /root/scripts/onecontainerd.sh ]]; then
             _red "Failed to download onecontainerd.sh"
             exit 1
         fi
-        chmod +x /root/scripts/onecontainerd.sh
+        chmod +x /root/scripts/onecontainerd.sh || return 1
+    fi
+    # onecontainerd validates downloaded image archives before loading them.
+    # Keep the validator beside the installed launcher so an old working
+    # launcher can never silently fall back to the unsafe inline implementation.
+    if [[ ! -s /root/scripts/validate_image_archive.py ]]; then
+        curl -fsSL --connect-timeout 10 --max-time 60 \
+            "${cdn_success_url}https://raw.githubusercontent.com/oneclickvirt/containerd/main/scripts/validate_image_archive.py" \
+            -o /root/scripts/validate_image_archive.py || return 1
+        if [[ ! -s /root/scripts/validate_image_archive.py ]]; then
+            _red "Failed to install validate_image_archive.py"
+            exit 1
+        fi
+        chmod +x /root/scripts/validate_image_archive.py || return 1
     fi
 }
 
@@ -265,7 +288,9 @@ check_cdn_file() {
     fi
 }
 
-check_cdn_file
+if [[ "${ONECLICKVIRT_TESTING:-}" != "1" ]]; then
+    check_cdn_file
+fi
 
 # ======== 读取日志，恢复编号状态 ========
 log_file="ctlog"
@@ -364,7 +389,7 @@ build_new_containers() {
             disk_size="$DEFAULT_CONTAINER_DISK"
         fi
     else
-        _yellow "当前快照器（$storage_driver）不支持硬盘大小限制，磁盘参数设为0"
+        _yellow "当前快照器（${storage_driver}）不支持硬盘大小限制，磁盘参数设为0"
         _yellow "Current snapshotter ($storage_driver) does not support disk size limitation, setting disk to 0"
         disk_size=0
     fi
@@ -387,7 +412,7 @@ build_new_containers() {
     if ! normalized_system_type=$(normalize_container_system "$requested_system_type"); then
         _red "Unsupported container system '${requested_system_type}'."
         print_supported_container_systems
-        exit 1
+        return 1
     fi
     if [[ "$(printf '%s' "$requested_system_type" | tr '[:upper:]' '[:lower:]' | tr -d '[:space:]')" != "$normalized_system_type" ]]; then
         _blue "Normalized container system '${requested_system_type}' to '${normalized_system_type}'"
@@ -429,12 +454,52 @@ build_new_containers() {
     _blue "======================================================"
 
     local scripts_dir
-    if [[ -f /root/scripts/onecontainerd.sh ]]; then
+    if [[ "${ONECLICKVIRT_TESTING:-}" == "1" ]]; then
+        scripts_dir="$SCRIPT_SOURCE_DIR"
+    elif [[ -f /root/scripts/onecontainerd.sh ]]; then
         scripts_dir="/root/scripts"
     elif [[ -f "$(dirname "$0")/onecontainerd.sh" ]]; then
         scripts_dir="$(dirname "$0")"
     else
         scripts_dir="/root"
+    fi
+
+    local pending_log
+    pending_log=$(mktemp "${log_file}.pending.XXXXXX") || {
+        _red "Unable to create a temporary container log"
+        return 1
+    }
+    local commit_log=""
+    local created_names=()
+    local batch_active=true
+    cleanup_batch() {
+        local index cname
+        for ((index = ${#created_names[@]} - 1; index >= 0; index--)); do
+            cname="${created_names[index]}"
+            nerdctl rm -f "$cname" >/dev/null 2>&1 || true
+        done
+        rm -f -- "$pending_log"
+        [[ -z "$commit_log" ]] || rm -f -- "$commit_log"
+        batch_active=false
+    }
+    cleanup_batch_on_exit() {
+        local status=$?
+        if [[ "$batch_active" == true ]]; then
+            cleanup_batch
+        fi
+        return "$status"
+    }
+    abort_batch() {
+        cleanup_batch
+        if [[ "${ONECLICKVIRT_TESTING:-}" != "1" ]]; then
+            trap - EXIT INT TERM
+        fi
+        return 1
+    }
+    if [[ "${ONECLICKVIRT_TESTING:-}" != "1" ]]; then
+        trap cleanup_batch_on_exit EXIT
+        trap 'exit 130' INT
+        trap 'exit 143' TERM
     fi
 
     for ((i = 1; i <= new_nums; i++)); do
@@ -449,7 +514,14 @@ build_new_containers() {
 
         _yellow "[${i}/${new_nums}] Creating container: ${container_name}  ssh:${ssh_port}  ports:${public_port_start}-${public_port_end}"
 
-        bash "${scripts_dir}/onecontainerd.sh" \
+        if nerdctl ps -a --format '{{.Names}}' 2>/dev/null | grep -Fxq "$container_name"; then
+            _red "Container ${container_name} already exists; the existing container and record were not changed"
+            abort_batch
+            return 1
+        fi
+        created_names+=("$container_name")
+        rm -f -- "/root/${container_name}" "${container_name}"
+        if ! bash "${scripts_dir}/onecontainerd.sh" \
             "$container_name" \
             "$cpu_nums" \
             "$memory_nums" \
@@ -459,22 +531,59 @@ build_new_containers() {
             "$public_port_end" \
             "$independent_ipv6" \
             "$system_type" \
-            "$disk_size"
-
-        # 将容器信息追加到 ctlog
-        if [[ -f "/root/${container_name}" ]]; then
-            cat "/root/${container_name}" >> "$log_file"
-            rm -f "/root/${container_name}"
-        elif [[ -f "${container_name}" ]]; then
-            cat "${container_name}" >> "$log_file"
-            rm -f "${container_name}"
-        else
-            # 手动写入一行
-            echo "${container_name} ${ssh_port} ${passwd} ${cpu_nums} ${memory_nums} ${public_port_start} ${public_port_end} ${disk_size}" >> "$log_file"
+            "$disk_size"; then
+            _red "Container ${container_name} creation failed; stopping the batch"
+            abort_batch
+            return 1
         fi
+
+        # onecontainerd must produce the record only after every required
+        # setup step succeeds. Never synthesize a success record after a
+        # failed or partial invocation.
+        local record_path=""
+        if [[ -f "/root/${container_name}" ]]; then
+            record_path="/root/${container_name}"
+        elif [[ -f "${container_name}" ]]; then
+            record_path="${container_name}"
+        fi
+        if [[ -z "$record_path" ]] || [[ ! -s "$record_path" ]] || \
+           ! awk -v expected="$container_name" 'NF >= 8 && $1 == expected { found = 1 } END { exit(found ? 0 : 1) }' "$record_path"; then
+            _red "Container ${container_name} did not produce a valid success record"
+            abort_batch
+            return 1
+        fi
+        if ! cat "$record_path" >> "$pending_log"; then
+            _red "Unable to stage the record for ${container_name}"
+            abort_batch
+            return 1
+        fi
+        rm -f -- "$record_path"
 
         _green "Container ${container_name} created and logged"
     done
+
+    commit_log=$(mktemp "${log_file}.commit.XXXXXX") || {
+        _red "Unable to create the container log commit file"
+        abort_batch
+        return 1
+    }
+    if [[ -f "$log_file" ]] && ! cat "$log_file" >"$commit_log"; then
+        _red "Unable to read the existing container log; rolling back this batch"
+        abort_batch
+        return 1
+    fi
+    if [[ ! -s "$pending_log" ]] || ! cat "$pending_log" >>"$commit_log" || \
+       ! mv -f -- "$commit_log" "$log_file"; then
+        _red "Unable to commit the container log; rolling back this batch"
+        abort_batch
+        return 1
+    fi
+    commit_log=""
+    rm -f -- "$pending_log"
+    batch_active=false
+    if [[ "${ONECLICKVIRT_TESTING:-}" != "1" ]]; then
+        trap - EXIT INT TERM
+    fi
 
     echo
     _green "======================================================"
@@ -503,11 +612,13 @@ show_log() {
 
 # ======== 主流程 ========
 main() {
-    pre_check
+    pre_check || return 1
     check_log
     show_log
-    build_new_containers
+    build_new_containers || return 1
     check_log
 }
 
-main "$@"
+if [[ "${ONECLICKVIRT_TESTING:-}" != "1" ]]; then
+    main "$@"
+fi

@@ -66,6 +66,10 @@ eval "$(extract_function configure_containerd_ipv6_ndp_state)"
 # shellcheck disable=SC1090 # The test intentionally loads one installer helper.
 eval "$(extract_function ndpresponder_image_matches_architecture)"
 # shellcheck disable=SC1090 # The test intentionally loads one installer helper.
+eval "$(extract_function ndpresponder_supports_ready_file)"
+# shellcheck disable=SC1090 # The test intentionally loads one installer helper.
+eval "$(extract_function ndpresponder_image_supports_required_features)"
+# shellcheck disable=SC1090 # The test intentionally loads one installer helper.
 eval "$(extract_function resolve_ndpresponder_image)"
 
 tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/containerd-ipv6-test.XXXXXX")
@@ -84,6 +88,12 @@ if [ "${1:-}" = "link" ] && [ "${2:-}" = "show" ]; then
     exit 0
 fi
 if [ "${1:-}" = "-6" ] && [ "${2:-}" = "route" ]; then
+    if [ "${3:-}" = "show" ] && [ "${4:-}" = "default" ] && [ "${IPV6_TEST_SCENARIO:-}" = delegated ]; then
+        # The management /128 uses the default route, while the delegated
+        # /38 is carried by a separate PVE bridge.
+        printf '%s\n' 'default via fe80::1 dev eth0 proto ra metric 1024'
+        exit 0
+    fi
     route_scenario=$IPV6_ROUTE_SCENARIO
     case "$route_scenario" in
         conflict) printf '%s\n' '2a14:6781:a::1:0:0/96 dev eth0 proto static metric 256' ;;
@@ -127,6 +137,11 @@ export PATH="$tmpdir:$PATH"
 detected=$(detect_global_ipv6_cidr eth0)
 if [[ "$detected" != "2a14:6781:000a:0000::10/64" ]]; then
     printf 'local public CIDR detection returned %q\n' "$detected" >&2
+    exit 1
+fi
+uplink=$(containerd_ipv6_uplink_interface)
+if [[ "$uplink" != eth0 ]]; then
+    printf 'normal /64 uplink detection returned %q\n' "$uplink" >&2
     exit 1
 fi
 export IPV6_TEST_SCENARIO=delegated
@@ -426,6 +441,11 @@ if [[ "$(grep -Fc 'nerdctl rm -f ndpresponder' <<<"$start_ndpresponder_source")"
     printf 'Containerd must remove a failed ndpresponder after health verification\n' >&2
     exit 1
 fi
+if ! grep -Fq -- '--ready-file /run/ndpresponder-ready' <<<"$start_ndpresponder_source" || \
+   ! grep -Fq 'containerd_ipv6_ndp_ready' "$repo_root/scripts/onecontainerd.sh"; then
+    printf 'Containerd must wait for the NDP responder readiness marker before allocating public IPv6\n' >&2
+    exit 1
+fi
 # shellcheck disable=SC2329 # Invoked by the dynamically sourced resolver.
 _yellow() { :; }
 ARCH_TYPE=arm64
@@ -466,6 +486,10 @@ nerdctl() {
             "$mock_build_succeeds"
             return
             ;;
+        run:--rm)
+            printf '%s\n' '      --ready-file value  responder readiness marker'
+            return 0
+            ;;
         rm:*)
             mock_remove_called=true
             return 0
@@ -478,6 +502,8 @@ nerdctl() {
 }
 # shellcheck disable=SC2034 # Consumed by the dynamically sourced resolver.
 NDPRESPONDER_SOURCE_URL=https://example.invalid/ndpresponder.git
+# shellcheck disable=SC2034 # Consumed by the dynamically sourced resolver.
+NDPRESPONDER_READY_FILE_REQUIRED=true
 if ! resolve_ndpresponder_image; then
     printf 'Containerd did not build a validated local responder after a bad registry architecture\n' >&2
     exit 1
@@ -552,5 +578,80 @@ fi
     printf 'Containerd removed the existing responder before rejecting the wrong architecture\n' >&2
     exit 1
 }
+
+# A process in the running state can still be probing the uplink. New
+# installations must wait for ndpresponder to confirm that it can answer NDP.
+# shellcheck disable=SC2329 # Invoked by the dynamically sourced responder starter.
+mkdir() { :; }
+# shellcheck disable=SC2329 # Invoked by the dynamically sourced responder starter.
+sleep() { :; }
+# shellcheck disable=SC2329 # Invoked by the dynamically sourced responder starter.
+nerdctl() {
+    case "$1:$2" in
+        pull:*)
+            return 0
+            ;;
+        image:inspect)
+            printf '%s\n' arm64
+            return 0
+            ;;
+        run:--rm)
+            printf '%s\n' '      --ready-file value  responder readiness marker'
+            return 0
+            ;;
+        run:-d)
+            printf '%s\n' eth0 >"$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_ndp_ready"
+            return 0
+            ;;
+        inspect:-f)
+            printf '%s\n' running
+            return 0
+            ;;
+        rm:*)
+            return 0
+            ;;
+        *)
+            printf 'unexpected nerdctl invocation during readiness test: %s\n' "$*" >&2
+            return 1
+            ;;
+    esac
+}
+if ! start_ndpresponder; then
+    printf 'Containerd did not accept a responder after its readiness marker was written\n' >&2
+    exit 1
+fi
+if [[ ! -s "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_ndp_ready" || \
+      "$(tr -d '[:space:]' <"$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_ndp_ready_required")" != true ]]; then
+    printf 'Containerd did not persist successful NDP readiness\n' >&2
+    exit 1
+fi
+
+extract_onecontainerd_function() {
+    local name="$1"
+    awk -v name="$name" '
+        $0 == name "() {" { printing = 1 }
+        printing {
+            print
+            if ($0 == "}") {
+                exit
+            }
+        }
+    ' "$repo_root/scripts/onecontainerd.sh"
+}
+# shellcheck disable=SC1090 # The test intentionally loads the creation readiness helper.
+eval "$(extract_onecontainerd_function containerd_ipv6_ready)"
+export CONTAINERD_CNI_IPV6_CONFIG="$tmpdir/containerd-ready.conflist"
+: >"$CONTAINERD_CNI_IPV6_CONFIG"
+printf '%s\n' true >"$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_enabled"
+printf '%s\n' 'fd42:5339:296f:1d00::/64' >"$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_subnet"
+if ! containerd_ipv6_ready; then
+    printf 'Containerd creation rejected a ready responder\n' >&2
+    exit 1
+fi
+: >"$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_ndp_ready"
+if containerd_ipv6_ready; then
+    printf 'Containerd creation accepted a responder before its readiness marker was present\n' >&2
+    exit 1
+fi
 
 printf 'containerd IPv6 network candidate tests passed\n'
