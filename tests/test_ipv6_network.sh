@@ -381,23 +381,31 @@ if host.ip in candidate:
     raise SystemExit(f"candidate contains host address: {candidate}")
 PY
 
-if extract_function check_ipv6 | grep -Eq 'API_NET|curl[[:space:]]'; then
+check_ipv6_source=$(extract_function check_ipv6)
+adapt_ipv6_source=$(extract_function adapt_ipv6)
+ula_network_source=$(extract_function create_containerd_ula_ipv6_network)
+if [[ -z "$check_ipv6_source" || -z "$adapt_ipv6_source" || -z "$ula_network_source" ]]; then
+    printf 'failed to extract one or more Containerd IPv6 helpers\n' >&2
+    exit 1
+fi
+
+if grep -Eq 'API_NET|curl[[:space:]]' <<<"$check_ipv6_source"; then
     printf 'check_ipv6 must not use an external address as a CNI subnet source\n' >&2
     exit 1
 fi
-if ! extract_function adapt_ipv6 | grep -Fq "net.ipv6.conf.\${uplink}.accept_ra=2"; then
+if ! grep -Fq "net.ipv6.conf.\${uplink}.accept_ra=2" <<<"$adapt_ipv6_source"; then
     printf 'Containerd IPv6 forwarding must preserve router advertisements on the uplink\n' >&2
     exit 1
 fi
-if extract_function adapt_ipv6 | grep -Eq 'update_sysctl[[:space:]].*proxy_ndp'; then
+if grep -Eq 'update_sysctl[[:space:]].*proxy_ndp' <<<"$adapt_ipv6_source"; then
     printf 'Containerd IPv6 setup must not change global proxy_ndp state\n' >&2
     exit 1
 fi
-if ! extract_function create_containerd_ula_ipv6_network | grep -Fq '"ipMasq": false'; then
+if ! grep -Fq '"ipMasq": false' <<<"$ula_network_source"; then
     printf 'Containerd ULA NAT66 must use the installer-owned firewall rule set exactly once\n' >&2
     exit 1
 fi
-if ! extract_function create_containerd_ula_ipv6_network | grep -Fq 'containerd_ipv6_ula_state_matches_cni'; then
+if ! grep -Fq 'containerd_ipv6_ula_state_matches_cni' <<<"$ula_network_source"; then
     printf 'Containerd ULA reuse must be guarded by matching installer state\n' >&2
     exit 1
 fi
