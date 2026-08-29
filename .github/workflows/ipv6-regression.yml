@@ -72,7 +72,8 @@ jobs:
         run: |
           set -euo pipefail
           images=(ubuntu:22.04 debian:12 alpine:3.20)
-          for image in "${images[@]}"; do
+          run_smoke() {
+            local image="$1"
             docker run --rm -v "$PWD:/repo:ro" -w /repo "$image" sh -c '
               set -eu
               if command -v apk >/dev/null 2>&1; then
@@ -87,4 +88,14 @@ jobs:
               cd "$tmp_repo"
               bash tests/script_smoke.sh
             '
+          }
+          for image in "${images[@]}"; do
+            if smoke_output=$(run_smoke "$image" 2>&1); then
+              printf '%s\n' "$smoke_output"
+              continue
+            fi
+            printf '%s\n' "$smoke_output"
+            annotation=$(printf '%s' "$smoke_output" | tail -n 80 | tr '\r\n' ' ' | cut -c1-7000 | sed 's/%/%25/g')
+            printf '::error title=Containerd smoke failed for %s::%s\n' "$image" "$annotation"
+            exit 1
           done
