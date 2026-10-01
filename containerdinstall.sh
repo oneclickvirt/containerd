@@ -33,10 +33,55 @@ is_truthy() {
     esac
 }
 is_noninteractive() {
-    is_truthy "${noninteractive:-${NONINTERACTIVE:-}}"
+    noninteractive="${noninteractive:-${NONINTERACTIVE:-}}"
+    export noninteractive
+    is_truthy "$noninteractive"
 }
 is_yes() {
     is_truthy "$1"
+}
+package_owns_path() {
+    local candidate="$1" resolved=""
+    [[ -e "$candidate" || -L "$candidate" ]] || return 1
+    resolved=$(readlink -f -- "$candidate" 2>/dev/null || printf '%s' "$candidate")
+    if command -v dpkg-query >/dev/null 2>&1 && {
+        dpkg-query -S "$candidate" >/dev/null 2>&1 ||
+        dpkg-query -S "$resolved" >/dev/null 2>&1;
+    }; then
+        return 0
+    fi
+    if command -v rpm >/dev/null 2>&1 && {
+        rpm -qf -- "$candidate" >/dev/null 2>&1 ||
+        rpm -qf -- "$resolved" >/dev/null 2>&1;
+    }; then
+        return 0
+    fi
+    if command -v apk >/dev/null 2>&1 && {
+        apk info --who-owns "$candidate" >/dev/null 2>&1 ||
+        apk info --who-owns "$resolved" >/dev/null 2>&1;
+    }; then
+        return 0
+    fi
+    return 1
+}
+guard_existing_containerd_owner() {
+    # A repeat run of this installer is allowed.  A Docker/distribution-owned
+    # daemon is not: replacing its config, service unit or data root would
+    # silently take over another runtime and make a later uninstall destructive.
+    [[ -f /usr/local/bin/containerd_arch ||
+       -f /usr/local/bin/containerd_service_created ]] && return 0
+    local docker_unit=""
+    docker_unit=$(systemctl cat docker.service 2>/dev/null || true)
+    if [[ -x /usr/bin/dockerd || -x /usr/local/bin/dockerd ||
+          "$docker_unit" == *"/run/containerd/containerd.sock"* ]] ||
+       package_owns_path /usr/bin/containerd ||
+       package_owns_path /usr/lib/systemd/system/containerd.service ||
+       package_owns_path /lib/systemd/system/containerd.service; then
+        _red "An existing Docker or package-owned containerd daemon was detected."
+        _red "Refusing to replace its service, configuration, or data root. Use a dedicated node for the OneClickVirt containerd runtime."
+        return 1
+    fi
+    return 0
 }
 reading() {
     is_noninteractive && return 1
@@ -61,14 +106,14 @@ if [ "$(id -u)" != "0" ]; then
     exit 1
 fi
 if [ ! -d /usr/local/bin ]; then
-    mkdir -p /usr/local/bin
+    mkdir -p /usr/local/bin || exit 1
 fi
 
 # ======== 系统检测 ========
-REGEX=("debian" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "'amazon linux'" "fedora" "arch" "alpine")
+REGEX=("debian" "ubuntu" "centos|red hat|kernel|oracle linux|alma|rocky" "amazon[[:space:]]+linux" "fedora" "arch" "alpine")
 RELEASE=("Debian" "Ubuntu" "CentOS" "CentOS" "Fedora" "Arch" "Alpine")
 PACKAGE_UPDATE=(
-    "! apt-get update && apt-get --fix-broken install -y && apt-get update"
+    "apt-get update || { apt-get --fix-broken install -y && apt-get update; }"
     "apt-get update"
     "yum -y update"
     "yum -y update"
@@ -175,13 +220,13 @@ SYSCTL_CONF="/etc/sysctl.d/99-containerd.conf"
 update_sysctl() {
     local key="${1%%=*}"
     local val="${1##*=}"
-    mkdir -p /etc/sysctl.d
+    mkdir -p /etc/sysctl.d || return 1
     if grep -q "^${key}" "$SYSCTL_CONF" 2>/dev/null; then
-        sed -i "s|^${key}.*|${key}=${val}|g" "$SYSCTL_CONF"
+        sed -i "s|^${key}.*|${key}=${val}|g" "$SYSCTL_CONF" || return 1
     else
-        echo "${key}=${val}" >> "$SYSCTL_CONF"
+        echo "${key}=${val}" >> "$SYSCTL_CONF" || return 1
     fi
-    sysctl -w "${key}=${val}" >/dev/null 2>&1 || true
+    sysctl -w "${key}=${val}" >/dev/null 2>&1 || return 1
 }
 
 is_private_ipv6() {
@@ -222,14 +267,69 @@ PY
 }
 
 # ======== 检测公网 IPv6 ========
+containerd_ipv6_ip_json_rows() {
+    local mode="$1" target="${2:-}"
+    command -v python3 >/dev/null 2>&1 || return 1
+    python3 - "$mode" "$target" <<'PY'
+import ipaddress
+import json
+import os
+import re
+import subprocess
+import sys
+
+mode, target = sys.argv[1:]
+args = {
+    "addresses": ["-6", "addr", "show"],
+    "routes": ["-6", "route", "show", "table", "all"],
+    "default": ["-6", "route", "show", "default"],
+    "link_type": ["-d", "link", "show", "dev", target],
+}.get(mode)
+if args is None:
+    raise SystemExit(1)
+try:
+    env = dict(os.environ, LC_ALL="C", NO_COLOR="1")
+    raw = subprocess.check_output(["ip", "-j", *args], env=env,
+                                  stderr=subprocess.DEVNULL)
+    raw = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", raw)
+    data = json.loads(raw)
+    if not isinstance(data, list):
+        raise ValueError("invalid ip JSON")
+    if mode == "addresses":
+        for interface in data:
+            name = interface.get("ifname", "")
+            for item in interface.get("addr_info", []):
+                if item.get("family") != "inet6" or item.get("tentative") or "tentative" in item.get("flags", []):
+                    continue
+                cidr = f'{item["local"]}/{item["prefixlen"]}'
+                ipaddress.IPv6Interface(cidr)
+                print(name, cidr, item.get("scope", ""), sep="\t")
+    elif mode == "routes":
+        for route in data:
+            destination = route.get("dst", "default")
+            if destination != "default":
+                print(ipaddress.IPv6Network(destination, strict=False))
+    elif mode == "default":
+        for route in data:
+            if route.get("dst", "default") == "default" and route.get("dev"):
+                print(route["dev"])
+                break
+    elif data:
+        print(data[0].get("link_type", ""))
+except (OSError, subprocess.CalledProcessError, ValueError, KeyError, TypeError):
+    raise SystemExit(1)
+PY
+}
+
 detect_global_ipv6_cidr() {
     local dev="${1:-}"
-    local candidates="" all_candidates=""
+    local candidates="" all_candidates="" rows=""
     if command -v ip >/dev/null 2>&1; then
+        rows=$(containerd_ipv6_ip_json_rows addresses) || return 1
         if [[ -n "$dev" ]]; then
-            candidates=$(ip -o -6 addr show dev "$dev" scope global 2>/dev/null | awk '$0 !~ / tentative/ {print $4}' || true)
+            candidates=$(printf '%s\n' "$rows" | awk -F '\t' -v dev="$dev" '$1 == dev && $3 == "global" {print $2}')
         fi
-        all_candidates=$(ip -o -6 addr show scope global 2>/dev/null | awk '$0 !~ / tentative/ {print $4}' || true)
+        all_candidates=$(printf '%s\n' "$rows" | awk -F '\t' '$3 == "global" {print $2}')
     fi
 
     # Keep the selected device first for equal-length prefixes, but consider
@@ -264,23 +364,14 @@ containerd_ipv6_uplink_interface() {
         selected=$(detect_global_ipv6_cidr "${interface:-}" 2>/dev/null || true)
     fi
     if [[ "$selected" == */* ]]; then
-        selected_if=$(ip -6 -o addr show scope global 2>/dev/null | awk -v cidr="$selected" '$4 == cidr {print $2; exit}')
+        selected_if=$(containerd_ipv6_ip_json_rows addresses 2>/dev/null | awk -F '\t' -v cidr="$selected" '$2 == cidr {print $1; exit}')
         if [[ -n "$selected_if" ]] && ip link show dev "$selected_if" >/dev/null 2>&1; then
             printf '%s\n' "$selected_if"
             return 0
         fi
     fi
 
-    uplink=$(ip -6 route show default 2>/dev/null | awk '
-        /^default / {
-            for (i = 1; i < NF; i++) {
-                if ($i == "dev") {
-                    print $(i + 1)
-                    exit
-                }
-            }
-        }
-    ')
+    uplink=$(containerd_ipv6_ip_json_rows default 2>/dev/null | sed -n '1p')
     if [[ -n "$uplink" ]] && ip link show dev "$uplink" >/dev/null 2>&1; then
         printf '%s\n' "$uplink"
         return 0
@@ -290,10 +381,10 @@ containerd_ipv6_uplink_interface() {
 }
 
 containerd_ipv6_uplink_supports_ndp() {
-    local uplink="$1" link_info
+    local uplink="$1" link_type
     [[ -n "$uplink" ]] || return 1
-    link_info=$(ip -d link show dev "$uplink" 2>/dev/null || ip link show dev "$uplink" 2>/dev/null || true)
-    grep -q 'link/ether' <<<"$link_info"
+    link_type=$(containerd_ipv6_ip_json_rows link_type "$uplink" 2>/dev/null) || return 1
+    [[ "$link_type" == ether ]]
 }
 
 configure_containerd_ipv6_ndp_state() {
@@ -358,7 +449,7 @@ detect_interface() {
         exit 1
     fi
     _blue "Main network interface: $interface"
-    echo "$interface" > /usr/local/bin/containerd_main_interface
+    echo "$interface" > /usr/local/bin/containerd_main_interface || return 1
 }
 
 # ======== btrfs 存储驱动支持 ========
@@ -366,16 +457,76 @@ check_storage_driver_support() {
     local driver="$1"
     case "$driver" in
         "btrfs")
-            if command -v btrfs >/dev/null 2>&1; then
-                modprobe btrfs 2>/dev/null || true
+            command -v btrfs >/dev/null 2>&1 || return 1
+            if grep -qw btrfs /proc/filesystems 2>/dev/null || grep -qw btrfs /proc/modules 2>/dev/null; then
                 return 0
             fi
-            return 1
+            modprobe btrfs 2>/dev/null || true
+            grep -qw btrfs /proc/filesystems 2>/dev/null || grep -qw btrfs /proc/modules 2>/dev/null
             ;;
         *)
             return 1
             ;;
     esac
+}
+
+select_standard_snapshotter() {
+    local data_root="${containerd_install_path:-$DEFAULT_CONTAINERD_INSTALL_PATH}"
+    local backing=""
+    if command -v findmnt >/dev/null 2>&1; then
+        backing=$(findmnt -T "$data_root" -n -o FSTYPE 2>/dev/null || true)
+    elif command -v stat >/dev/null 2>&1; then
+        backing=$(stat -f -c '%T' "$data_root" 2>/dev/null || true)
+    fi
+    case "$backing" in
+        overlay|overlayfs|aufs|fuseblk)
+            _yellow "Containerd data root uses $backing; selecting the native snapshotter"
+            printf '%s\n' native
+            ;;
+        *)
+            printf '%s\n' overlayfs
+            ;;
+    esac
+}
+
+containerd_data_root_has_state() {
+    local data_root="${1:-${containerd_install_path:-$DEFAULT_CONTAINERD_INSTALL_PATH}}"
+    [ -d "$data_root" ] || return 1
+    find "$data_root" -mindepth 1 -maxdepth 1 -print -quit 2>/dev/null | grep -q .
+}
+
+configured_containerd_snapshotter() {
+    local configured="" state_file="${CONTAINERD_STORAGE_DRIVER_STATE:-/usr/local/bin/containerd_storage_driver}"
+    local config_file="${CONTAINERD_CONFIG_FILE:-/etc/containerd/config.toml}"
+    local nerdctl_config="${NERDCTL_CONFIG_FILE:-/etc/nerdctl/nerdctl.toml}"
+    if [ -f "$state_file" ]; then
+        configured=$(sed -n '1p' "$state_file" 2>/dev/null || true)
+    fi
+    if [ -z "$configured" ] && [ -f "$nerdctl_config" ]; then
+        configured=$(sed -n -n 's/^[[:space:]]*snapshotter[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$nerdctl_config" | sed -n '1p')
+    fi
+    if [ -z "$configured" ] && [ -f "$config_file" ]; then
+        configured=$(sed -n -n 's/^[[:space:]]*snapshotter[[:space:]]*=[[:space:]]*"\([^"]*\)".*$/\1/p' "$config_file" | sed -n '1p')
+    fi
+    case "$configured" in
+        overlayfs|native|btrfs) printf '%s\n' "$configured" ;;
+        *) return 1 ;;
+    esac
+}
+
+guard_containerd_snapshotter() {
+    local selected="$1" existing=""
+    containerd_data_root_has_state || return 0
+    existing=$(configured_containerd_snapshotter || true)
+    if [ -z "$existing" ]; then
+        _red "Containerd data root ${containerd_install_path:-$DEFAULT_CONTAINERD_INSTALL_PATH} already contains data, but its snapshotter cannot be identified. Refusing to switch to ${selected}; restore the original configuration first."
+        return 1
+    fi
+    if [ "$existing" != "$selected" ]; then
+        _red "Containerd data root uses ${existing}, but installation selected ${selected}. Refusing a snapshotter change that could hide existing images and containers."
+        return 1
+    fi
+    return 0
 }
 
 install_storage_driver() {
@@ -387,16 +538,16 @@ install_storage_driver() {
                 _yellow "Installing btrfs-progs..."
                 case $SYSTEM in
                     Debian|Ubuntu)
-                        ${PACKAGE_INSTALL[int]} btrfs-progs 2>/dev/null || true
+                        ${PACKAGE_INSTALL[int]} btrfs-progs 2>/dev/null || return 1
                         ;;
                     CentOS|Fedora)
-                        ${PACKAGE_INSTALL[int]} btrfs-progs 2>/dev/null || true
+                        ${PACKAGE_INSTALL[int]} btrfs-progs 2>/dev/null || return 1
                         ;;
                     Alpine)
-                        ${PACKAGE_INSTALL[int]} btrfs-progs 2>/dev/null || true
+                        ${PACKAGE_INSTALL[int]} btrfs-progs 2>/dev/null || return 1
                         ;;
                     *)
-                        ${PACKAGE_INSTALL[int]} btrfs-progs 2>/dev/null || true
+                        ${PACKAGE_INSTALL[int]} btrfs-progs 2>/dev/null || return 1
                         ;;
                 esac
                 modprobe btrfs 2>/dev/null || true
@@ -414,8 +565,13 @@ install_storage_driver() {
         _green "存储驱动 $driver 已安装。系统将在5秒后重启以加载内核模块。"
         _yellow "重启后请再次执行本脚本以继续安装（仅 btrfs 磁盘限制场景需要此步骤）。"
         sleep 5
-        reboot
-        exit 0
+        if reboot; then
+            # A successful reboot normally terminates this process. Keep the
+            # explicit exit for init systems that return after scheduling it.
+            exit 0
+        fi
+        _red "System reboot command failed; refusing to continue without the requested btrfs driver."
+        return 1
     fi
 }
 
@@ -427,47 +583,104 @@ setup_containerd_btrfs_loop() {
     local loop_dir
     loop_dir=$(dirname "$loop_file")
     if [ ! -d "$loop_dir" ]; then
-        mkdir -p "$loop_dir"
+        mkdir -p "$loop_dir" || {
+            _red "Unable to create containerd loop directory: $loop_dir"
+            return 1
+        }
     fi
     # 若 containerd 正在运行，先停止
     if command -v systemctl >/dev/null 2>&1 && systemctl is-active --quiet containerd 2>/dev/null; then
-        systemctl stop containerd 2>/dev/null || true
+        systemctl stop containerd 2>/dev/null || {
+            _red "Unable to stop containerd before preparing its btrfs data root"
+            return 1
+        }
     elif command -v rc-service >/dev/null 2>&1 && rc-service containerd status >/dev/null 2>&1; then
-        rc-service containerd stop 2>/dev/null || true
+        rc-service containerd stop 2>/dev/null || {
+            _red "Unable to stop containerd before preparing its btrfs data root"
+            return 1
+        }
     fi
     # 若 loop 文件已存在且已挂载，则跳过格式化以避免损坏已有数据
     if [ -f "$loop_file" ] && losetup -j "$loop_file" 2>/dev/null | grep -q "$loop_file"; then
         _green "Loop file $loop_file already exists and is attached, skipping creation."
         local loop_device
         loop_device=$(losetup -j "$loop_file" | cut -d: -f1 || true)
-        mkdir -p "$mount_point"
-        mount "$loop_device" "$mount_point" 2>/dev/null || true
-        echo "$loop_device" > /usr/local/bin/containerd_loop_device
-        echo "$loop_file" > /usr/local/bin/containerd_loop_file
-        echo "$mount_point" > /usr/local/bin/containerd_mount_point
+        mkdir -p "$mount_point" || return 1
+        if ! mountpoint -q "$mount_point" 2>/dev/null && ! mount "$loop_device" "$mount_point" 2>/dev/null; then
+            _red "Existing containerd btrfs loop filesystem could not be mounted: $mount_point"
+            return 1
+        fi
+        mountpoint -q "$mount_point" 2>/dev/null || {
+            _red "containerd btrfs loop mount is not active: $mount_point"
+            return 1
+        }
+        printf '%s\n' "$loop_device" > /usr/local/bin/containerd_loop_device || return 1
+        printf '%s\n' "$loop_file" > /usr/local/bin/containerd_loop_file || return 1
+        printf '%s\n' "$mount_point" > /usr/local/bin/containerd_mount_point || return 1
         return
+    fi
+    # An unattached image can still contain a previous containerd store. Keep
+    # a recoverable backup instead of allowing fallocate to truncate it.
+    if [ -f "$loop_file" ]; then
+        local backup_loop_file="${loop_file}.backup.$(date +%Y%m%d-%H%M%S)"
+        if ! mv -- "$loop_file" "$backup_loop_file"; then
+            _red "Failed to back up existing containerd loop file: $loop_file"
+            return 1
+        fi
+        _yellow "Existing containerd loop file backed up to: $backup_loop_file"
     fi
     if [ -d "$mount_point" ] && [ "$(ls -A "$mount_point" 2>/dev/null)" ]; then
         _yellow "Backing up existing containerd data at $mount_point ..."
-        mv "$mount_point" "${mount_point}.backup.$(date +%Y%m%d-%H%M%S)"
+        mv "$mount_point" "${mount_point}.backup.$(date +%Y%m%d-%H%M%S)" || {
+            _red "Failed to back up existing containerd data: $mount_point"
+            return 1
+        }
     fi
     _yellow "Creating ${pool_size_gb}GB loop file at $loop_file ..."
-    fallocate -l "${pool_size_gb}G" "$loop_file"
+    if ! fallocate -l "${pool_size_gb}G" "$loop_file"; then
+        _red "Failed to allocate containerd btrfs loop file: $loop_file"
+        return 1
+    fi
     local loop_device
-    loop_device=$(losetup --find --show "$loop_file")
+    if ! loop_device=$(losetup --find --show "$loop_file") || [ -z "$loop_device" ]; then
+        _red "Failed to attach containerd btrfs loop file: $loop_file"
+        rm -f -- "$loop_file"
+        return 1
+    fi
     _green "Loop device created: $loop_device"
     _yellow "Creating btrfs filesystem on $loop_device ..."
-    mkfs.btrfs -f "$loop_device"
-    mkdir -p "$mount_point"
-    mount "$loop_device" "$mount_point"
-    if ! grep -q "$loop_file" /etc/fstab; then
-        echo "$loop_file $mount_point btrfs loop,defaults 0 0" >> /etc/fstab
+    if ! mkfs.btrfs -f "$loop_device"; then
+        _red "Failed to format containerd btrfs loop device: $loop_device"
+        losetup -d "$loop_device" 2>/dev/null || true
+        rm -f -- "$loop_file"
+        return 1
     fi
-    chmod 755 "$mount_point"
+    if ! mkdir -p "$mount_point"; then
+        _red "Failed to create containerd mount point: $mount_point"
+        losetup -d "$loop_device" 2>/dev/null || true
+        rm -f -- "$loop_file"
+        return 1
+    fi
+    if ! mount "$loop_device" "$mount_point"; then
+        _red "Failed to mount containerd btrfs loop filesystem: $mount_point"
+        losetup -d "$loop_device" 2>/dev/null || true
+        rm -f -- "$loop_file"
+        return 1
+    fi
+    if ! grep -q "$loop_file" /etc/fstab; then
+        if ! printf '%s\n' "$loop_file $mount_point btrfs loop,defaults 0 0" >> /etc/fstab; then
+            _red "Failed to persist containerd btrfs mount in /etc/fstab"
+            umount "$mount_point" 2>/dev/null || true
+            losetup -d "$loop_device" 2>/dev/null || true
+            rm -f -- "$loop_file"
+            return 1
+        fi
+    fi
+    chmod 755 "$mount_point" || return 1
     _green "containerd btrfs loop filesystem setup completed"
-    echo "$loop_device" > /usr/local/bin/containerd_loop_device
-    echo "$loop_file" > /usr/local/bin/containerd_loop_file
-    echo "$mount_point" > /usr/local/bin/containerd_mount_point
+    printf '%s\n' "$loop_device" > /usr/local/bin/containerd_loop_device || return 1
+    printf '%s\n' "$loop_file" > /usr/local/bin/containerd_loop_file || return 1
+    printf '%s\n' "$mount_point" > /usr/local/bin/containerd_mount_point || return 1
 }
 
 try_storage_drivers() {
@@ -476,9 +689,9 @@ try_storage_drivers() {
         need_disk_limit=$(cat /usr/local/bin/containerd_need_disk_limit)
     fi
     if [ "$need_disk_limit" != "true" ]; then
-        _yellow "Using overlayfs snapshotter (standard installation, no disk size limitation)."
-        _yellow "使用 overlayfs 快照器（标准安装，无硬盘大小限制）。"
-        echo "overlayfs" > /usr/local/bin/containerd_storage_driver
+        selected_snapshotter=$(select_standard_snapshotter) || return 1
+        guard_containerd_snapshotter "$selected_snapshotter" || return 1
+        printf '%s\n' "$selected_snapshotter" | tail -n 1 > /usr/local/bin/containerd_storage_driver
         return 0
     fi
     # 处理重启后检测
@@ -488,11 +701,14 @@ try_storage_drivers() {
         rm -f /usr/local/bin/containerd_storage_reboot
         _green "System rebooted. Checking storage driver: $reboot_driver"
         if check_storage_driver_support "$reboot_driver"; then
+            guard_containerd_snapshotter "$reboot_driver" || return 1
             echo "$reboot_driver" > /usr/local/bin/containerd_storage_driver
             return 0
         else
-            _yellow "Storage driver $reboot_driver still not available after reboot. Falling back to overlayfs."
-            echo "overlayfs" > /usr/local/bin/containerd_storage_driver
+            _yellow "Storage driver $reboot_driver still not available after reboot. Selecting a supported fallback."
+            selected_snapshotter=$(select_standard_snapshotter) || return 1
+            guard_containerd_snapshotter "$selected_snapshotter" || return 1
+            printf '%s\n' "$selected_snapshotter" | tail -n 1 > /usr/local/bin/containerd_storage_driver
             return 0
         fi
     fi
@@ -502,17 +718,21 @@ try_storage_drivers() {
     fi
     if check_storage_driver_support "btrfs"; then
         _green "btrfs is available, using btrfs snapshotter."
+        guard_containerd_snapshotter btrfs || return 1
         echo "btrfs" > /usr/local/bin/containerd_storage_driver
         return 0
     else
         _yellow "Trying to install btrfs storage driver..."
-        install_storage_driver "btrfs"
+        install_storage_driver "btrfs" || return 1
         if check_storage_driver_support "btrfs"; then
+            guard_containerd_snapshotter btrfs || return 1
             echo "btrfs" > /usr/local/bin/containerd_storage_driver
             return 0
         else
-            _yellow "btrfs installation failed. Falling back to overlayfs (no disk limit support)."
-            echo "overlayfs" > /usr/local/bin/containerd_storage_driver
+            _yellow "btrfs installation failed. Selecting a supported fallback without disk limits."
+            selected_snapshotter=$(select_standard_snapshotter) || return 1
+            guard_containerd_snapshotter "$selected_snapshotter" || return 1
+            printf '%s\n' "$selected_snapshotter" | tail -n 1 > /usr/local/bin/containerd_storage_driver
             return 0
         fi
     fi
@@ -523,19 +743,22 @@ install_base_deps() {
     _yellow "Installing base dependencies..."
     case $SYSTEM in
         Debian|Ubuntu)
-            eval "${PACKAGE_UPDATE[int]}" 2>/dev/null || true
+            eval "${PACKAGE_UPDATE[int]}" 2>/dev/null || return 1
             ${PACKAGE_INSTALL[int]} curl wget ca-certificates nftables iptables iproute2 \
-                socat unzip tar jq python3 git 2>/dev/null || true
+                socat unzip tar jq python3 git 2>/dev/null || return 1
             ;;
         CentOS|Fedora)
             ${PACKAGE_INSTALL[int]} curl wget ca-certificates nftables iptables iproute \
-                socat unzip tar jq python3 git 2>/dev/null || true
+                socat unzip tar jq python3 git 2>/dev/null || return 1
             ;;
         Alpine)
-            ${PACKAGE_UPDATE[int]} 2>/dev/null || true
+            ${PACKAGE_UPDATE[int]} 2>/dev/null || return 1
             ${PACKAGE_INSTALL[int]} curl wget ca-certificates nftables iptables iproute2 \
-                socat unzip tar jq python3 git 2>/dev/null || true
+                socat unzip tar jq python3 git 2>/dev/null || return 1
             ;;
+        *)
+            _red "Unsupported package manager for containerd prerequisites"
+            return 1
     esac
     _green "Base dependencies installed"
 }
@@ -616,6 +839,30 @@ install_containerd_stack() {
     fi
     _green "nerdctl-full extracted to /usr/local"
 
+    # nerdctl-full changed its CNI plugin location from /opt/cni/bin to
+    # /usr/local/libexec/cni in newer releases. Keep the standard path used
+    # by containerd/CRI, while preserving administrator-owned plugins.
+    local cni_source=""
+    local cni_candidate
+    for cni_candidate in /opt/cni/bin /usr/local/libexec/cni /usr/local/lib/cni /usr/lib/cni; do
+        if [[ -x "$cni_candidate/bridge" ]]; then
+            cni_source="$cni_candidate"
+            break
+        fi
+    done
+    if [[ -z "$cni_source" ]]; then
+        _red "nerdctl-full did not provide a usable CNI plugin directory"
+        return 1
+    fi
+    mkdir -p /opt/cni/bin || return 1
+    local cni_plugin
+    for cni_plugin in bridge host-local loopback portmap firewall tuning; do
+        if [[ ! -e "/opt/cni/bin/$cni_plugin" ]] && [[ -x "$cni_source/$cni_plugin" ]]; then
+            ln -s "$cni_source/$cni_plugin" "/opt/cni/bin/$cni_plugin" || return 1
+        fi
+    done
+    _green "CNI plugins available at /opt/cni/bin (source: $cni_source)"
+
     # Make commands available immediately even when /usr/local/bin is absent from current PATH.
     for bin_name in nerdctl containerd ctr runc buildctl buildkitd; do
         if [[ -x "/usr/local/bin/${bin_name}" ]] && [[ ! -e "/usr/bin/${bin_name}" ]]; then
@@ -671,6 +918,7 @@ Delegate=yes
 WantedBy=multi-user.target
 EOF
     fi
+    printf '%s\n' bundle > /usr/local/bin/containerd_service_created || return 1
 
     # 确保 /usr/local/bin 在 PATH 中（持久化且避免重复写入）
     if ! echo "$PATH" | grep -q "/usr/local/bin"; then
@@ -691,13 +939,10 @@ EOF
 # ======== 配置 containerd ========
 configure_containerd() {
     _yellow "Configuring containerd..."
-    mkdir -p /etc/containerd
-    if command -v containerd >/dev/null 2>&1; then
-        containerd config default > /etc/containerd/config.toml 2>/dev/null || true
-        if [[ -f /etc/containerd/config.toml ]]; then
-            sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml || true
-        fi
-    fi
+    mkdir -p /etc/containerd || return 1
+    command -v containerd >/dev/null 2>&1 || return 1
+    containerd config default > /etc/containerd/config.toml 2>/dev/null || return 1
+    sed -i 's/SystemdCgroup = false/SystemdCgroup = true/' /etc/containerd/config.toml || return 1
 
     # 若需要硬盘限制，配置 btrfs 快照器和自定义 data root
     local need_disk_limit="false"
@@ -742,21 +987,52 @@ configure_containerd() {
         fi
         _green "containerd configured with btrfs snapshotter (disk size limitation enabled)"
     else
-        # 确保 nerdctl 使用 overlayfs（默认）
-        mkdir -p /etc/nerdctl
-        if [ ! -f /etc/nerdctl/nerdctl.toml ]; then
-            echo 'snapshotter = "overlayfs"' > /etc/nerdctl/nerdctl.toml
+        # Use overlayfs on normal hosts and native on overlay-backed nested
+        # environments where overlay-on-overlay cannot mount container roots.
+        case "$storage_driver" in
+            overlayfs|native) ;;
+            *) storage_driver="overlayfs" ;;
+        esac
+        if grep -q 'snapshotter = "overlayfs"' /etc/containerd/config.toml 2>/dev/null; then
+            sed -i "s/snapshotter = \"overlayfs\"/snapshotter = \"${storage_driver}\"/" /etc/containerd/config.toml || return 1
         fi
-        _green "containerd configured with overlayfs snapshotter (standard)"
+        mkdir -p /etc/nerdctl
+        if [ -f /etc/nerdctl/nerdctl.toml ] && grep -q '^snapshotter[[:space:]]*=' /etc/nerdctl/nerdctl.toml; then
+            sed -i "s|^snapshotter[[:space:]]*=.*|snapshotter = \"${storage_driver}\"|" /etc/nerdctl/nerdctl.toml || return 1
+        else
+            echo "snapshotter = \"${storage_driver}\"" >> /etc/nerdctl/nerdctl.toml || return 1
+        fi
+        _green "containerd configured with ${storage_driver} snapshotter (standard)"
+    fi
+    if [[ "$storage_driver" == "native" || "$storage_driver" == "btrfs" ]]; then
+        local transfer_platform
+        case "$(uname -m)" in
+            x86_64|amd64) transfer_platform="linux/amd64" ;;
+            aarch64|arm64) transfer_platform="linux/arm64" ;;
+            armv7l|armv7) transfer_platform="linux/arm/v7" ;;
+            *) transfer_platform="linux/$(uname -m)" ;;
+        esac
+        # containerd 2.x needs an explicit unpack target when a non-default
+        # snapshotter is selected. Without this block image pulls fail with
+        # "no unpack platforms defined" before any container can start.
+        if ! grep -Fq '# oneclickvirt transfer unpack configuration' /etc/containerd/config.toml; then
+            cat >> /etc/containerd/config.toml <<EOF
+
+# oneclickvirt transfer unpack configuration
+[[plugins."io.containerd.transfer.v1.local".unpack_config]]
+platform = "${transfer_platform}"
+snapshotter = "${storage_driver}"
+EOF
+        fi
     fi
 }
 
 # ======== 配置 CNI 网络 ========
 configure_cni() {
     _yellow "Configuring CNI network..."
-    mkdir -p /etc/cni/net.d
+    mkdir -p /etc/cni/net.d || return 1
 
-    cat > /etc/cni/net.d/10-containerd-net.conflist <<'EOF'
+    cat > /etc/cni/net.d/10-containerd-net.conflist <<'EOF' || return 1
 {
   "cniVersion": "1.0.0",
   "name": "containerd-net",
@@ -813,38 +1089,49 @@ detect_firewall_backend() {
 setup_firewall_rules() {
     _yellow "Setting up firewall rules for containerd-net (172.20.0.0/16)..."
     if [[ "$FIREWALL_BACKEND" == "nftables" ]]; then
-        setup_nftables_ipv4
+        setup_nftables_ipv4 || return 1
     elif [[ "$FIREWALL_BACKEND" == "iptables" ]]; then
-        setup_iptables_ipv4
+        setup_iptables_ipv4 || return 1
     else
-        _yellow "No firewall backend available, skipping"
-        return
+        _red "No firewall backend available; CNI ipMasq is disabled and IPv4 NAT is required"
+        return 1
     fi
-    persist_firewall_rules
+    persist_firewall_rules || return 1
 }
 
 setup_nftables_ipv4() {
-    nft delete table ip containerd 2>/dev/null || true
-    nft add table ip containerd 2>/dev/null || true
-    nft add chain ip containerd postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' 2>/dev/null || true
-    nft add rule ip containerd postrouting ip saddr 172.20.0.0/16 ip daddr != 172.20.0.0/16 masquerade 2>/dev/null || true
-    nft add chain ip containerd forward '{ type filter hook forward priority filter; policy accept; }' 2>/dev/null || true
-    nft add rule ip containerd forward ip saddr 172.20.0.0/16 accept 2>/dev/null || true
-    nft add rule ip containerd forward ip daddr 172.20.0.0/16 accept 2>/dev/null || true
+    # Existing tables can contain active instance port mappings. Never delete
+    # the table to install base networking or to enable optional IPv6.
+    nft list table ip containerd >/dev/null 2>&1 || nft add table ip containerd || return 1
+    nft list chain ip containerd postrouting >/dev/null 2>&1 ||
+        nft add chain ip containerd postrouting '{ type nat hook postrouting priority srcnat; policy accept; }' || return 1
+    nft list chain ip containerd forward >/dev/null 2>&1 ||
+        nft add chain ip containerd forward '{ type filter hook forward priority filter; policy accept; }' || return 1
+    ensure_nftables_ipv4_rule postrouting 'ip saddr 172.20.0.0/16 ip daddr != 172.20.0.0/16 masquerade' \
+        ip saddr 172.20.0.0/16 ip daddr != 172.20.0.0/16 masquerade || return 1
+    ensure_nftables_ipv4_rule forward 'ip saddr 172.20.0.0/16 accept' ip saddr 172.20.0.0/16 accept || return 1
+    ensure_nftables_ipv4_rule forward 'ip daddr 172.20.0.0/16 accept' ip daddr 172.20.0.0/16 accept || return 1
     _green "nftables IPv4 NAT/FORWARD rules configured"
+}
+
+ensure_nftables_ipv4_rule() {
+    local chain="$1" pattern="$2" rules
+    shift 2
+    rules=$(nft list chain ip containerd "$chain") || return 1
+    grep -Fq -- "$pattern" <<< "$rules" || nft add rule ip containerd "$chain" "$@"
 }
 
 setup_iptables_ipv4() {
     if ! command -v iptables >/dev/null 2>&1; then
-        _yellow "iptables not found, skipping"
-        return
+        _red "iptables not found"
+        return 1
     fi
     iptables -t nat -C POSTROUTING -s 172.20.0.0/16 ! -d 172.20.0.0/16 -j MASQUERADE 2>/dev/null || \
-        iptables -t nat -A POSTROUTING -s 172.20.0.0/16 ! -d 172.20.0.0/16 -j MASQUERADE 2>/dev/null || true
+        iptables -t nat -A POSTROUTING -s 172.20.0.0/16 ! -d 172.20.0.0/16 -j MASQUERADE || return 1
     iptables -C FORWARD -s 172.20.0.0/16 -j ACCEPT 2>/dev/null || \
-        iptables -A FORWARD -s 172.20.0.0/16 -j ACCEPT 2>/dev/null || true
+        iptables -A FORWARD -s 172.20.0.0/16 -j ACCEPT || return 1
     iptables -C FORWARD -d 172.20.0.0/16 -j ACCEPT 2>/dev/null || \
-        iptables -A FORWARD -d 172.20.0.0/16 -j ACCEPT 2>/dev/null || true
+        iptables -A FORWARD -d 172.20.0.0/16 -j ACCEPT || return 1
     _green "iptables IPv4 NAT/FORWARD rules configured"
 }
 
@@ -858,7 +1145,7 @@ persist_firewall_rules() {
 }
 
 persist_nftables_rules() {
-    mkdir -p /etc/nftables.d
+    mkdir -p /etc/nftables.d || return 1
     local nft_file="/etc/nftables.d/containerd.nft"
     {
         echo '#!/usr/sbin/nft -f'
@@ -868,11 +1155,11 @@ persist_nftables_rules() {
         if nft list table ip6 containerd >/dev/null 2>&1; then
             nft list table ip6 containerd
         fi
-    } > "$nft_file"
-    chmod 644 "$nft_file"
+    } > "$nft_file" || return 1
+    chmod 644 "$nft_file" || return 1
     if [[ -f /etc/nftables.conf ]]; then
         if ! grep -q 'include "/etc/nftables.d/' /etc/nftables.conf 2>/dev/null; then
-            echo 'include "/etc/nftables.d/*.nft"' >> /etc/nftables.conf
+            echo 'include "/etc/nftables.d/*.nft"' >> /etc/nftables.conf || return 1
         fi
     else
         cat > /etc/nftables.conf <<'NFTEOF'
@@ -880,32 +1167,35 @@ persist_nftables_rules() {
 flush ruleset
 include "/etc/nftables.d/*.nft"
 NFTEOF
+            [ -s /etc/nftables.conf ] || return 1
     fi
     if command -v systemctl >/dev/null 2>&1; then
         systemctl enable nftables 2>/dev/null || true
     fi
     _green "nftables rules persisted"
+    return 0
 }
 
 persist_iptables_rules() {
-    mkdir -p /etc/iptables 2>/dev/null || true
+    mkdir -p /etc/iptables 2>/dev/null || return 1
     if command -v iptables-save >/dev/null 2>&1; then
-        iptables-save > /etc/iptables/rules.v4 2>/dev/null || true
+        iptables-save > /etc/iptables/rules.v4 2>/dev/null || return 1
     fi
     if command -v ip6tables-save >/dev/null 2>&1; then
-        ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || true
+        ip6tables-save > /etc/iptables/rules.v6 2>/dev/null || return 1
     fi
     if [[ "$SYSTEM" == "Debian" || "$SYSTEM" == "Ubuntu" ]]; then
         if ! command -v netfilter-persistent >/dev/null 2>&1; then
-            ${PACKAGE_INSTALL[int]} iptables-persistent 2>/dev/null || true
+            ${PACKAGE_INSTALL[int]} iptables-persistent 2>/dev/null || _yellow "iptables-persistent unavailable; rules file was still written"
         fi
         if command -v systemctl >/dev/null 2>&1; then
             systemctl enable netfilter-persistent 2>/dev/null || true
         fi
     elif [[ "$SYSTEM" == "CentOS" || "$SYSTEM" == "Fedora" ]]; then
-        service iptables save 2>/dev/null || \
-            iptables-save > /etc/sysconfig/iptables 2>/dev/null || true
+            service iptables save 2>/dev/null || \
+            iptables-save > /etc/sysconfig/iptables 2>/dev/null || _yellow "iptables service persistence unavailable"
     fi
+    return 0
 }
 
 # ======== 配置内核参数 ========
@@ -913,11 +1203,13 @@ configure_kernel() {
     _yellow "Configuring kernel parameters..."
     modprobe overlay 2>/dev/null || true
     modprobe br_netfilter 2>/dev/null || true
-    update_sysctl "net.ipv4.ip_forward=1"
-    update_sysctl "net.bridge.bridge-nf-call-iptables=1"
-    update_sysctl "net.bridge.bridge-nf-call-ip6tables=1"
-    sysctl --system >/dev/null 2>&1 || true
+    update_sysctl "net.ipv4.ip_forward=1" || return 1
+    update_sysctl "net.bridge.bridge-nf-call-iptables=1" || _yellow "bridge-nf-call-iptables is unavailable; continuing"
+    update_sysctl "net.bridge.bridge-nf-call-ip6tables=1" || _yellow "bridge-nf-call-ip6tables is unavailable; continuing"
+    sysctl --system >/dev/null 2>&1 || return 1
+    [ "$(sysctl -n net.ipv4.ip_forward 2>/dev/null)" = "1" ] || return 1
     _green "Kernel parameters configured"
+    return 0
 }
 
 # ======== 启动服务 ========
@@ -935,10 +1227,11 @@ start_services() {
         systemctl start buildkit 2>/dev/null || true
     fi
     sleep 2
-    if pgrep -x containerd >/dev/null 2>&1; then
+    if ctr version >/dev/null 2>&1; then
         _green "containerd is running"
     else
-        _yellow "Warning: containerd may not be running. Check: systemctl status containerd"
+        _red "containerd API is unavailable. Check the containerd service logs"
+        return 1
     fi
 }
 
@@ -951,11 +1244,11 @@ adapt_ipv6() {
         _yellow "Could not determine the IPv6 uplink; leaving host IPv6 settings unchanged"
         return 1
     fi
-    update_sysctl "net.ipv6.conf.all.forwarding=1"
+    update_sysctl "net.ipv6.conf.all.forwarding=1" || return 1
     # Forwarding otherwise disables ordinary RA processing on Linux. Keep the
     # actual IPv6 uplink's SLAAC route alive without changing global proxy_ndp.
-    update_sysctl "net.ipv6.conf.${uplink}.accept_ra=2"
-    sysctl --system >/dev/null 2>&1 || true
+    update_sysctl "net.ipv6.conf.${uplink}.accept_ra=2" || return 1
+    sysctl --system >/dev/null 2>&1 || return 1
 
     local ipv6_subnet="" ipv4_subnet="172.21.0.0/16" ipv6_mode=""
     if [[ -f /usr/local/bin/containerd_ipv6_subnet ]]; then
@@ -966,7 +1259,7 @@ adapt_ipv6() {
     if [[ "$FIREWALL_BACKEND" == "nftables" ]]; then
         # ipMasq is disabled in the CNI config so both the IPv4 side of this
         # dual-stack bridge and ULA NAT66 are owned by one persistent rule set.
-        setup_nftables_ipv4
+        setup_nftables_ipv4 || return 1
         nft list chain ip containerd postrouting >/dev/null 2>&1 || return 1
         nft list chain ip containerd forward >/dev/null 2>&1 || return 1
         nft add rule ip containerd postrouting ip saddr "$ipv4_subnet" ip daddr != "$ipv4_subnet" masquerade 2>/dev/null || return 1
@@ -1015,7 +1308,7 @@ adapt_ipv6() {
         _red "No usable firewall backend is available for Containerd IPv6"
         return 1
     fi
-    persist_firewall_rules 2>/dev/null || true
+    persist_firewall_rules || return 1
 }
 
 # ======== 创建 IPv6 CNI 网络 ========
@@ -1055,11 +1348,13 @@ PY
 # a child of the selected parent route is intentional and becomes a more
 # specific bridge route, while an equal or more-specific existing route is not.
 cni_ipv6_subnet_overlaps_host() {
-    local subnet="$1"
+    local subnet="$1" addresses routes
     command -v python3 >/dev/null 2>&1 || return 2
+    addresses=$(containerd_ipv6_ip_json_rows addresses) || return 0
+    routes=$(containerd_ipv6_ip_json_rows routes) || return 0
     {
-        ip -6 -o addr show 2>/dev/null | awk '$0 !~ / tentative/ {print $4}'
-        ip -6 route show table all 2>/dev/null | awk '$1 ~ /^[0-9A-Fa-f:]+\/[0-9]+$/ {print $1}'
+        printf '%s\n' "$addresses" | awk -F '\t' 'NF >= 2 {print $2}'
+        printf '%s\n' "$routes"
     } | python3 -c '
 import ipaddress
 import sys
@@ -1096,9 +1391,10 @@ PY
 # is how PVE delegated prefixes and normal NDP-backed /64s remain usable.
 # Do not overwrite a route already equal to, or more specific than, that child.
 cni_ipv6_subnet_conflicts_with_host_route() {
-    local subnet="$1"
+    local subnet="$1" routes
     command -v python3 >/dev/null 2>&1 || return 2
-    ip -6 route show table all 2>/dev/null | awk '$1 ~ /^[0-9A-Fa-f:]+\/[0-9]+$/ {print $1}' | python3 -c '
+    routes=$(containerd_ipv6_ip_json_rows routes) || return 0
+    printf '%s\n' "$routes" | python3 -c '
 import ipaddress
 import sys
 
@@ -1295,7 +1591,9 @@ derive_containerd_ipv6_subnet() {
         CONTAINERD_IPV6_INDEX_EXPLICIT="$index_explicit" \
         python3 - 2>/dev/null <<'PY'
 import ipaddress
+import json
 import os
+import re
 import subprocess
 import sys
 
@@ -1314,23 +1612,29 @@ try:
         raise ValueError("IPv6 subnet index is outside the parent prefix")
 
     host_children = set()
-    try:
-        output = subprocess.check_output(["ip", "-6", "-o", "addr", "show"], text=True, stderr=subprocess.DEVNULL)
-    except (OSError, subprocess.CalledProcessError):
-        output = ""
+    env = dict(os.environ, LC_ALL="C", NO_COLOR="1")
+    output = subprocess.check_output(
+        ["ip", "-j", "-6", "addr", "show"], env=env, stderr=subprocess.DEVNULL
+    )
+    output = re.sub(rb"\x1b\[[0-?]*[ -/]*[@-~]", b"", output)
+    interfaces = json.loads(output)
+    if not isinstance(interfaces, list):
+        raise ValueError("invalid IPv6 address JSON")
     child_size = 1 << (128 - target_prefix)
-    for line in output.splitlines():
-        if " tentative " in f" {line} ":
-            continue
-        fields = line.split()
-        if len(fields) < 4:
-            continue
-        try:
-            address = ipaddress.ip_interface(fields[3]).ip
-        except ValueError:
-            continue
-        if address.version == 6 and address in parent:
-            host_children.add((int(address) - int(parent.network_address)) // child_size)
+    for interface in interfaces:
+        if not isinstance(interface, dict):
+            raise ValueError("invalid IPv6 interface row")
+        addresses = interface.get("addr_info", [])
+        if not isinstance(addresses, list):
+            raise ValueError("invalid IPv6 address list")
+        for item in addresses:
+            if not isinstance(item, dict):
+                raise ValueError("invalid IPv6 address row")
+            if item.get("family") != "inet6":
+                continue
+            address = ipaddress.IPv6Address(item["local"])
+            if address in parent:
+                host_children.add((int(address) - int(parent.network_address)) // child_size)
 
     candidates = [requested_index]
     if not explicit_index:
@@ -1414,11 +1718,18 @@ create_ipv6_network() {
     fi
 
     mkdir -p "$state_dir" || return 1
-    printf '%s\n' "$ipv6_cidr" > "${state_dir}/containerd_ipv6_parent"
-    printf '%s\n' "$prefix" > "${state_dir}/containerd_ipv6_subnet"
-    printf '%s\n' managed > "${state_dir}/containerd_ipv6_network_mode"
+    if ! printf '%s\n' "$ipv6_cidr" > "${state_dir}/containerd_ipv6_parent" ||
+       ! printf '%s\n' "$prefix" > "${state_dir}/containerd_ipv6_subnet" ||
+       ! printf '%s\n' managed > "${state_dir}/containerd_ipv6_network_mode"; then
+        _red "Failed to persist Containerd IPv6 network state"
+        rm -f -- \
+            "${state_dir}/containerd_ipv6_parent" \
+            "${state_dir}/containerd_ipv6_subnet" \
+            "${state_dir}/containerd_ipv6_network_mode"
+        return 1
+    fi
 
-    cat > "$cni_config" <<EOF
+    if ! cat > "$cni_config" <<EOF
 {
   "cniVersion": "1.0.0",
   "name": "containerd-ipv6",
@@ -1459,6 +1770,14 @@ create_ipv6_network() {
   ]
 }
 EOF
+    then
+        _red "Failed to write Containerd IPv6 CNI configuration: $cni_config"
+        rm -f -- \
+            "${state_dir}/containerd_ipv6_parent" \
+            "${state_dir}/containerd_ipv6_subnet" \
+            "${state_dir}/containerd_ipv6_network_mode"
+        return 1
+    fi
     _green "IPv6 CNI network (containerd-ipv6) created: $prefix"
     return 0
 }
@@ -1697,7 +2016,14 @@ verify_install() {
         _green "All components installed successfully"
     else
         _yellow "Some components missing, please check manually"
+        return 1
     fi
+    ctr version >/dev/null || return 1
+    nerdctl network inspect containerd-net >/dev/null || return 1
+    local plugin
+    for plugin in bridge host-local loopback portmap firewall tuning; do
+        [ -x "/opt/cni/bin/$plugin" ] || { _red "Required CNI plugin missing: $plugin"; return 1; }
+    done
 }
 
 # ======== 主流程 ========
@@ -1708,6 +2034,8 @@ main() {
     _blue "  2026.08.26"
     _blue "======================================================"
     echo
+
+    guard_existing_containerd_owner || return 1
 
     # 重新计算 int（系统类型索引）
     for ((int = 0; int < ${#REGEX[@]}; int++)); do
@@ -1758,6 +2086,14 @@ main() {
             containerd_install_path="$DEFAULT_CONTAINERD_INSTALL_PATH"
         fi
     fi
+    if [[ "$containerd_install_path" != /* ]]; then
+        _red "CONTAINERD_INSTALL_PATH must be an absolute path"
+        return 1
+    fi
+    mkdir -p "$containerd_install_path" || {
+        _red "Unable to create containerd storage path: $containerd_install_path"
+        return 1
+    }
     echo "$containerd_install_path" > /usr/local/bin/containerd_install_path
 
     if is_yes "$need_disk_limit_input"; then
@@ -1796,6 +2132,10 @@ main() {
                 containerd_loop_file="$DEFAULT_CONTAINERD_LOOP_FILE"
             fi
         fi
+        if [[ "$containerd_loop_file" != /* ]]; then
+            _red "CONTAINERD_LOOP_FILE must be an absolute path"
+            return 1
+        fi
 
         _green "将安装支持容器磁盘大小限制的 containerd 环境（btrfs 存储驱动）"
         _green "Will install containerd with container disk size limitation support (btrfs storage driver)"
@@ -1807,12 +2147,15 @@ main() {
         _green "Will install standard containerd without container disk size limitation"
     fi
 
-    install_base_deps
-    detect_interface
+    install_base_deps || return 1
+    detect_interface || return 1
     check_ipv6
 
     # 确定存储驱动（含重启后检测，btrfs 安装后需要重启）
-    try_storage_drivers
+    # Snapshotter selection protects existing data roots.  A refusal must
+    # abort installation instead of continuing and overwriting the runtime
+    # configuration with a potentially incompatible snapshotter.
+    try_storage_drivers || return 1
 
     # 获取最终存储驱动
     local final_driver="overlayfs"
@@ -1827,16 +2170,16 @@ main() {
     fi
     if [ "$need_disk_limit" = "true" ] && [ "$final_driver" = "btrfs" ] && \
        [ -n "$containerd_pool_size" ] && [ -n "$containerd_loop_file" ]; then
-        setup_containerd_btrfs_loop "$containerd_pool_size" "$containerd_loop_file" "$containerd_install_path"
+        setup_containerd_btrfs_loop "$containerd_pool_size" "$containerd_loop_file" "$containerd_install_path" || return 1
     fi
 
-    install_containerd_stack
-    configure_containerd
-    configure_cni
-    detect_firewall_backend
-    setup_firewall_rules
-    configure_kernel
-    start_services
+    install_containerd_stack || return 1
+    configure_containerd || return 1
+    configure_cni || return 1
+    detect_firewall_backend || return 1
+    setup_firewall_rules || return 1
+    configure_kernel || return 1
+    start_services || return 1
     setup_dns_check
 
     if [[ "$IPV6_ENABLED" == true ]] && \
@@ -1853,13 +2196,15 @@ main() {
     # 保存架构信息
     echo "$ARCH_TYPE" > /usr/local/bin/containerd_arch
 
-    verify_install
+    verify_install || return 1
 
     echo
     _green "======================================================"
     _green "  ✓ Containerd 安装完成！"
     if [ "$need_disk_limit" = "true" ] && [ "$final_driver" = "btrfs" ]; then
         _green "  ✓ 硬盘大小限制：已启用（btrfs 快照器）"
+    elif [ "$final_driver" = "native" ]; then
+        _yellow "  ✗ 硬盘大小限制：未启用（native 快照器；用于 overlay-backed 宿主兼容性）"
     else
         _yellow "  ✗ 硬盘大小限制：未启用（overlayfs 快照器）"
     fi

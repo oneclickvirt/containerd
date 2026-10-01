@@ -28,7 +28,9 @@ is_truthy() {
     esac
 }
 is_noninteractive() {
-    is_truthy "${noninteractive:-${NONINTERACTIVE:-}}"
+    noninteractive="${noninteractive:-${NONINTERACTIVE:-}}"
+    export noninteractive
+    is_truthy "$noninteractive"
 }
 reading() {
     is_noninteractive && return 1

@@ -55,6 +55,8 @@ eval "$(extract_function create_containerd_ula_ipv6_network)"
 eval "$(extract_function create_ipv6_network)"
 # shellcheck disable=SC1090 # The test intentionally loads installer helpers.
 eval "$(extract_function is_public_ipv6)"
+# shellcheck disable=SC1090 # The test intentionally loads the JSON ip parser.
+eval "$(extract_function containerd_ipv6_ip_json_rows)"
 # shellcheck disable=SC1090 # The test intentionally loads one installer function.
 eval "$(extract_function detect_global_ipv6_cidr)"
 # shellcheck disable=SC1090 # The test intentionally loads IPv6 uplink helpers.
@@ -76,6 +78,52 @@ tmpdir=$(mktemp -d "${TMPDIR:-/tmp}/containerd-ipv6-test.XXXXXX")
 trap 'rm -rf -- "$tmpdir"' EXIT
 cat > "$tmpdir/ip" <<'EOF'
 #!/bin/sh
+if [ "${1:-}" = "-j" ]; then
+    [ "${LC_ALL:-}" = C ] && [ "${NO_COLOR:-}" = 1 ] || exit 88
+    if [ "${2:-}" = "-d" ]; then
+        case "${6:-}" in
+            he-ipv6) printf '%s\n' '[{"ifname":"he-ipv6","link_type":"sit"}]' ;;
+            *) printf '%s\n' '[{"ifname":"vmbr2","link_type":"ether"}]' ;;
+        esac
+    elif [ "${3:-}" = "route" ]; then
+        case " $* " in
+            *" default "*) printf '%s\n' '[{"dst":"default","dev":"eth0"}]' ;;
+            *)
+                if [ "${IPV6_ROUTE_SCENARIO:-}" = conflict ]; then
+                    printf '%s\n' '[{"dst":"2a14:6781:a::1:0:0/96","dev":"eth0"}]'
+                else
+                    printf '%s\n' '[{"dst":"2a14:6781:a::/64","dev":"eth0"}]'
+                fi
+                ;;
+        esac
+    else
+        case "${IPV6_TEST_SCENARIO:-default}" in
+            delegated)
+                printf '%s\n' '[{"ifname":"vmbr0","addr_info":[{"family":"inet6","local":"2a14:7c0:1002:10f8::1","prefixlen":128,"scope":"global"}]},{"ifname":"vmbr2","addr_info":[{"family":"inet6","local":"2a14:7c0:1002:10f8::1","prefixlen":38,"scope":"global"}]}]'
+                ;;
+            tunnel)
+                printf '%s\n' '[{"ifname":"he-ipv6","addr_info":[{"family":"inet6","local":"2001:470:1f14:9::2","prefixlen":64,"scope":"global"}]}]'
+                ;;
+            narrow120|narrow127)
+                if [ "${IPV6_TEST_SCENARIO}" = narrow120 ]; then cidr=2a14:6781:a::9; prefix=120; else cidr=2a14:6781:a::8; prefix=127; fi
+                printf '[{"ifname":"eth0","addr_info":[{"family":"inet6","local":"%s","prefixlen":%s,"scope":"global"}]}]\n' "$cidr" "$prefix"
+                ;;
+            colored)
+                printf '\033[34m%s\033[0m\n' '[{"ifname":"eth0","addr_info":[{"family":"inet6","local":"2a14:6781:a::9","prefixlen":120,"scope":"global"}]}]'
+                ;;
+            tentative_only)
+                printf '%s\n' '[{"ifname":"eth0","addr_info":[{"family":"inet6","local":"2a14:6781:000a:0000::9","prefixlen":64,"scope":"global","flags":["tentative"]}]}]'
+                ;;
+            localized_bad_json)
+                printf '\033[31mUngültige Adresse / Adresse non valide / IPv6 地址无效\033[0m\n'
+                ;;
+            *)
+                printf '%s\n' '[{"ifname":"eth0","addr_info":[{"family":"inet6","local":"fd42::1","prefixlen":64,"scope":"global"},{"family":"inet6","local":"2a14:6781:000a:0000::9","prefixlen":64,"scope":"global","flags":["tentative"]},{"family":"inet6","local":"2a14:6781:000a:0000::10","prefixlen":64,"scope":"global"}]}]'
+                ;;
+        esac
+    fi
+    exit 0
+fi
 if [ "${1:-}" = "-d" ] && [ "${2:-}" = "link" ]; then
     case "${5:-}" in
         he-ipv6) printf '%s\n' '5: he-ipv6: <POINTOPOINT,UP> mtu 1480 link/sit' ;;
@@ -193,12 +241,36 @@ if [[ "$detected" != '2a14:6781:a::8/127' ]]; then
     printf 'routed /127 detection returned %q\n' "$detected" >&2
     exit 1
 fi
+export IPV6_TEST_SCENARIO=colored
+detected=$(detect_global_ipv6_cidr eth0)
+if [[ "$detected" != '2a14:6781:a::9/120' ]]; then
+    printf 'colored JSON IPv6 detection returned %q\n' "$detected" >&2
+    exit 1
+fi
 unset IPV6_TEST_SCENARIO
 candidate=$(derive_containerd_ipv6_subnet "$host_cidr" 96 0 false)
 if derive_containerd_ipv6_subnet "$host_cidr" 96 0 true >/dev/null; then
     printf 'explicit host-containing CNI subnet was accepted\n' >&2
     exit 1
 fi
+export IPV6_TEST_SCENARIO=tentative_only
+candidate=$(derive_containerd_ipv6_subnet "$host_cidr" 96 0 false)
+if [[ "$candidate" != '2a14:6781:a::1:0:0/96' ]]; then
+    printf 'tentative host IPv6 address was not reserved before selecting a CNI child: %q\n' "$candidate" >&2
+    exit 1
+fi
+export IPV6_TEST_SCENARIO=colored
+candidate=$(derive_containerd_ipv6_subnet "$host_cidr" 96 0 false)
+if [[ "$candidate" != '2a14:6781:a::1:0:0/96' ]]; then
+    printf 'colored IPv6 JSON did not preserve the host address reservation: %q\n' "$candidate" >&2
+    exit 1
+fi
+export IPV6_TEST_SCENARIO=localized_bad_json
+if derive_containerd_ipv6_subnet "$host_cidr" 96 0 false >/dev/null; then
+    printf 'localized non-JSON ip output was accepted as proof that the host prefix is unused\n' >&2
+    exit 1
+fi
+unset IPV6_TEST_SCENARIO
 
 # A routed host /128 proves IPv6 connectivity but cannot provide a CNI child
 # subnet. The installer must use its private ULA NAT66 fallback instead.

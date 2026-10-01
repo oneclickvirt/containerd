@@ -59,7 +59,7 @@ fi
 
 # ======== 安装必要模块 ========
 install_required_modules() {
-    local modules=("wget" "curl" "sudo" "openssh-server")
+    local modules=("wget" "curl" "sudo" "openssh-server" "ca-certificates")
     case $SYSTEM in
         Debian|Ubuntu)
             apt-get update -y 2>/dev/null || true
@@ -100,6 +100,24 @@ disable_selinux_iptables() {
 }
 
 # ======== 配置 sshd ========
+enable_sshd_dual_stack() {
+    local config_file="$1" config_dir="$2" file
+    # OpenSSH binds every available address family when no ListenAddress is
+    # forced. An explicit 0.0.0.0 listener blocks direct IPv6 SSH.
+    for file in "$config_file" "${config_dir}"*; do
+        [ -f "$file" ] || continue
+        sed -E -i \
+            -e '/^[[:space:]]*#/b' \
+            -e '/^[[:space:]]*AddressFamily[[:space:]]+any([[:space:]]|$)/b' \
+            -e 's/^[[:space:]]*AddressFamily[[:space:]]+.*/# &/' \
+            -e 's/^[[:space:]]*ListenAddress[[:space:]]+.*/# &/' \
+            "$file"
+    done
+    if ! grep -Eq '^[[:space:]]*AddressFamily[[:space:]]+any([[:space:]]|$)' "$config_file"; then
+        sed -i '1iAddressFamily any' "$config_file"
+    fi
+}
+
 update_sshd_config() {
     local config_file="/etc/ssh/sshd_config"
     # 处理 include 目录中的覆盖配置
@@ -118,10 +136,7 @@ update_sshd_config() {
     sed -i "s/^#\?PasswordAuthentication.*/PasswordAuthentication yes/g" "$config_file"
     sed -i "s/^#\?PubkeyAuthentication.*/PubkeyAuthentication yes/g" "$config_file"
     sed -i "s/^#\?UsePAM.*/UsePAM yes/g" "$config_file"
-    # 确保监听所有接口
-    grep -q "^ListenAddress 0.0.0.0" "$config_file" || \
-        sed -i 's/#ListenAddress 0.0.0.0/ListenAddress 0.0.0.0/' "$config_file" || \
-        echo "ListenAddress 0.0.0.0" >> "$config_file"
+    enable_sshd_dual_stack "$config_file" "$config_dir"
 }
 
 # ======== 修复 cloud-init 策略 ========
@@ -139,15 +154,27 @@ start_sshd() {
     ssh-keygen -A 2>/dev/null || true
     # 确保 /var/run/sshd 目录存在
     mkdir -p /var/run/sshd
+    # The image entrypoint may already run sshd as PID 1. Restarting it via
+    # service would terminate the container itself; validate and keep it.
+    if pgrep -x sshd >/dev/null 2>&1 || pidof sshd >/dev/null 2>&1; then
+        /usr/sbin/sshd -t 2>/dev/null || return 1
+        if [ "$(cat /proc/1/comm 2>/dev/null)" = sshd ]; then
+            kill -HUP 1 || return 1
+        elif command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
+            systemctl reload ssh 2>/dev/null || systemctl reload sshd 2>/dev/null || return 1
+        fi
+        return 0
+    fi
     # 启动 sshd
-    if command -v systemctl >/dev/null 2>&1; then
+    if command -v systemctl >/dev/null 2>&1 && [ -d /run/systemd/system ]; then
         systemctl enable ssh 2>/dev/null || systemctl enable sshd 2>/dev/null || true
-        systemctl restart ssh 2>/dev/null || systemctl restart sshd 2>/dev/null || true
+        systemctl start ssh 2>/dev/null || systemctl start sshd 2>/dev/null || true
     elif command -v service >/dev/null 2>&1; then
-        service ssh restart 2>/dev/null || service sshd restart 2>/dev/null || true
+        service ssh start 2>/dev/null || service sshd start 2>/dev/null || true
     else
         /usr/sbin/sshd 2>/dev/null || true
     fi
+    pgrep -x sshd >/dev/null 2>&1 || pidof sshd >/dev/null 2>&1
 }
 
 # ======== 设置自启动 cron 任务确保 sshd 存活 ========

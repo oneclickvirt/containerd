@@ -31,7 +31,7 @@ fi
 
 # 安装 SSH 及相关工具
 apk update 2>/dev/null || true
-apk add --no-cache openssh-server openssh openssh-keygen bash curl wget cronie 2>/dev/null || true
+apk add --no-cache openssh-server openssh openssh-keygen bash curl wget cronie ca-certificates 2>/dev/null || true
 
 # 生成主机密钥
 mkdir -p /etc/ssh
@@ -43,8 +43,20 @@ if [ -f "$config_file" ]; then
     sed -i '/^#PermitRootLogin\|PermitRootLogin/c PermitRootLogin yes' "$config_file"
     sed -i '/^#PasswordAuthentication\|PasswordAuthentication/c PasswordAuthentication yes' "$config_file"
     sed -i '/^#PubkeyAuthentication\|PubkeyAuthentication/c PubkeyAuthentication yes' "$config_file"
-    sed -i 's/#ListenAddress 0.0.0.0/ListenAddress 0.0.0.0/' "$config_file"
     sed -i 's/#Port 22/Port 22/' "$config_file"
+    # Leave listeners unspecified so sshd binds both available IP families.
+    for file in "$config_file" "${config_dir}"*; do
+        [ -f "$file" ] || continue
+        sed -E -i \
+            -e '/^[[:space:]]*#/b' \
+            -e '/^[[:space:]]*AddressFamily[[:space:]]+any([[:space:]]|$)/b' \
+            -e 's/^[[:space:]]*AddressFamily[[:space:]]+.*/# &/' \
+            -e 's/^[[:space:]]*ListenAddress[[:space:]]+.*/# &/' \
+            "$file"
+    done
+    if ! grep -Eq '^[[:space:]]*AddressFamily[[:space:]]+any([[:space:]]|$)' "$config_file"; then
+        sed -i '1iAddressFamily any' "$config_file"
+    fi
 fi
 
 # 修复 cloud-init
@@ -62,7 +74,15 @@ printf '%s:%s\n' root "$passwd_input" | chpasswd 2>/dev/null || true
 
 # 启动 sshd
 rc-update add sshd default 2>/dev/null || true
-/usr/sbin/sshd 2>/dev/null || true
+if ! /usr/sbin/sshd -t 2>/dev/null; then
+    echo "sshd configuration validation failed" >&2
+    exit 1
+fi
+if [ "$(cat /proc/1/comm 2>/dev/null)" = sshd ]; then
+    kill -HUP 1
+else
+    /usr/sbin/sshd 2>/dev/null || true
+fi
 
 # 设置 cron 保活
 cron_line="* * * * * pgrep -x sshd>/dev/null||/usr/sbin/sshd"

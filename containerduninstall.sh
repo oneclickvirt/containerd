@@ -26,11 +26,55 @@ is_truthy() {
     esac
 }
 is_noninteractive() {
-    is_truthy "${noninteractive:-${NONINTERACTIVE:-}}"
+    noninteractive="${noninteractive:-${NONINTERACTIVE:-}}"
+    export noninteractive
+    is_truthy "$noninteractive"
 }
 is_yes() {
     is_truthy "$1"
 }
+
+package_owns_path() {
+    local candidate="$1" resolved=""
+    [[ -e "$candidate" || -L "$candidate" ]] || return 1
+    resolved=$(readlink -f -- "$candidate" 2>/dev/null || printf '%s' "$candidate")
+    if command -v dpkg-query >/dev/null 2>&1 && {
+        dpkg-query -S "$candidate" >/dev/null 2>&1 ||
+        dpkg-query -S "$resolved" >/dev/null 2>&1;
+    }; then
+        return 0
+    fi
+    if command -v rpm >/dev/null 2>&1 && {
+        rpm -qf -- "$candidate" >/dev/null 2>&1 ||
+        rpm -qf -- "$resolved" >/dev/null 2>&1;
+    }; then
+        return 0
+    fi
+    if command -v apk >/dev/null 2>&1 && {
+        apk info --who-owns "$candidate" >/dev/null 2>&1 ||
+        apk info --who-owns "$resolved" >/dev/null 2>&1;
+    }; then
+        return 0
+    fi
+    return 1
+}
+
+containerd_is_shared() {
+    local docker_unit=""
+    docker_unit=$(systemctl cat docker.service 2>/dev/null || true)
+    [[ -x /usr/bin/dockerd || -x /usr/local/bin/dockerd ||
+       "$docker_unit" == *"/run/containerd/containerd.sock"* ]] && return 0
+    package_owns_path /usr/bin/containerd && return 0
+    package_owns_path /usr/lib/systemd/system/containerd.service && return 0
+    package_owns_path /lib/systemd/system/containerd.service && return 0
+    return 1
+}
+
+CONTAINERD_SHARED=false
+if containerd_is_shared; then
+    CONTAINERD_SHARED=true
+    _yellow "检测到 Docker 或系统包共用 containerd；仅删除 OneClickVirt/nerdctl 资源，保留共享守护进程、配置和数据。"
+fi
 
 if [ "$(id -u)" != "0" ]; then
     _red "This script must be run as root"
@@ -61,15 +105,19 @@ fi
 # ======== 1. 停止并删除所有容器（包括 ndpresponder） ========
 _blue "[1/10] 停止并删除所有容器..."
 if command -v nerdctl >/dev/null 2>&1; then
-    # 列出所有命名空间
-    mapfile -t namespaces < <(nerdctl namespace ls -q 2>/dev/null || printf 'default\n')
-    for ns in "${namespaces[@]}"; do
-        mapfile -t containers < <(nerdctl -n "$ns" ps -aq 2>/dev/null || true)
-        if [[ "${#containers[@]}" -gt 0 ]]; then
-            _yellow "  删除命名空间 ${ns} 中的容器..."
-            nerdctl -n "$ns" rm -f "${containers[@]}" 2>/dev/null || true
-        fi
-    done
+    # OneClickVirt creates nerdctl workloads in the default namespace.  Never
+    # iterate over every namespace: Docker owns `moby`, Kubernetes owns
+    # `k8s.io`, and deleting either would destroy unrelated workloads.
+    managed_namespace="${CONTAINERD_NAMESPACE:-default}"
+    if [[ ! "$managed_namespace" =~ ^[A-Za-z0-9_.-]+$ ]]; then
+        _red "Invalid CONTAINERD_NAMESPACE: $managed_namespace"
+        exit 1
+    fi
+    mapfile -t containers < <(nerdctl -n "$managed_namespace" ps -aq 2>/dev/null || true)
+    if [[ "${#containers[@]}" -gt 0 ]]; then
+        _yellow "  删除命名空间 ${managed_namespace} 中的容器..."
+        nerdctl -n "$managed_namespace" rm -f "${containers[@]}" 2>/dev/null || true
+    fi
     _green "  容器已清理"
 else
     _yellow "  nerdctl 未找到，跳过容器删除"
@@ -78,14 +126,12 @@ fi
 # ======== 2. 删除所有镜像 ========
 _blue "[2/10] 删除所有容器镜像..."
 if command -v nerdctl >/dev/null 2>&1; then
-    mapfile -t namespaces < <(nerdctl namespace ls -q 2>/dev/null || printf 'default\n')
-    for ns in "${namespaces[@]}"; do
-        mapfile -t images < <(nerdctl -n "$ns" images -q 2>/dev/null || true)
-        if [[ "${#images[@]}" -gt 0 ]]; then
-            _yellow "  删除命名空间 ${ns} 中的镜像..."
-            nerdctl -n "$ns" rmi -f "${images[@]}" 2>/dev/null || true
-        fi
-    done
+    managed_namespace="${CONTAINERD_NAMESPACE:-default}"
+    mapfile -t images < <(nerdctl -n "$managed_namespace" images -q 2>/dev/null || true)
+    if [[ "${#images[@]}" -gt 0 ]]; then
+        _yellow "  删除命名空间 ${managed_namespace} 中的镜像..."
+        nerdctl -n "$managed_namespace" rmi -f "${images[@]}" 2>/dev/null || true
+    fi
     _green "  镜像已清理"
 fi
 
@@ -93,7 +139,9 @@ fi
 _blue "[3/10] 停止并禁用 systemd 服务..."
 # nftables is a host-wide firewall service, not a Containerd-owned daemon.
 # Leave it enabled so removing Containerd cannot take down unrelated rules.
-for svc in buildkit buildkitd containerd check-dns; do
+services=(buildkit buildkitd check-dns)
+[[ "$CONTAINERD_SHARED" == true ]] || services+=(containerd)
+for svc in "${services[@]}"; do
     if systemctl is-active --quiet "$svc" 2>/dev/null; then
         systemctl stop "$svc" 2>/dev/null || true
         _yellow "  已停止 ${svc}"
@@ -102,16 +150,29 @@ for svc in buildkit buildkitd containerd check-dns; do
         systemctl disable "$svc" 2>/dev/null || true
     fi
 done
-# 删除 systemd 服务文件
+# Delete bundle-owned units, never distribution-package units.  A legacy
+# installer-created /etc override is identifiable by its /usr/local ExecStart;
+# package or administrator units are preserved.
 for f in \
     /usr/local/lib/systemd/system/containerd.service \
     /usr/local/lib/systemd/system/buildkit.service \
-    /etc/systemd/system/containerd.service \
     /etc/systemd/system/buildkit.service \
     /etc/systemd/system/check-dns.service \
-    /usr/lib/systemd/system/containerd.service \
     /usr/lib/systemd/system/buildkit.service; do
-    [[ -f "$f" ]] && rm -f "$f" && _yellow "  删除 $f"
+    if [[ -f "$f" ]] && ! package_owns_path "$f"; then
+        rm -f -- "$f" && _yellow "  删除 $f"
+    fi
+done
+if [[ -f /etc/systemd/system/containerd.service ]] &&
+   { [[ -f /usr/local/bin/containerd_service_created ]] ||
+     grep -Fq 'ExecStart=/usr/local/bin/containerd' /etc/systemd/system/containerd.service; }; then
+    rm -f -- /etc/systemd/system/containerd.service
+    _yellow "  删除 OneClickVirt 创建的 /etc/systemd/system/containerd.service"
+fi
+for f in /usr/lib/systemd/system/containerd.service /lib/systemd/system/containerd.service; do
+    if [[ -f "$f" ]] && ! package_owns_path "$f" && [[ "$CONTAINERD_SHARED" != true ]]; then
+        rm -f -- "$f" && _yellow "  删除 $f"
+    fi
 done
 systemctl daemon-reload 2>/dev/null || true
 _green "  服务已清理"
@@ -120,6 +181,10 @@ _green "  服务已清理"
 _blue "[4/10] 清理 CNI 网络配置..."
 rm -f /etc/cni/net.d/10-containerd-net.conflist
 rm -f /etc/cni/net.d/11-containerd-ipv6.conflist
+# nerdctl creates its default bridge profile lazily; remove it as part of the
+# same uninstall so a subsequent install does not inherit stale network IDs.
+rm -f /etc/cni/net.d/nerdctl-bridge.conflist
+rm -f /etc/cni/net.d/.nerdctl.lock /etc/cni/net.d/.cni-concurrency.lock
 # 删除残留 CNI 网络接口
 for br in ctn-br0 ctn-br1 nerdctl0 nerdctl1; do
     if ip link show "$br" >/dev/null 2>&1; then
@@ -184,6 +249,27 @@ _green "  防火墙规则已清理"
 
 # ======== 6. 删除 nerdctl-full 二进制及配置 ========
 _blue "[6/10] 删除 nerdctl/containerd 二进制文件..."
+# The nerdctl-full bundle is installed under /usr/local.  Debian packages
+# may provide /usr/bin/runc, ctr, or containerd for Docker and other runtimes;
+# never remove a package-owned executable while uninstalling this bundle.
+remove_bundle_binary() {
+    local bin="$1" owner=""
+    [[ -f "$bin" ]] || return 0
+    if [[ "$bin" == /usr/local/* ]]; then
+        rm -f -- "$bin"
+        _yellow "  删除 $bin"
+        return 0
+    fi
+    if command -v dpkg-query >/dev/null 2>&1; then
+        owner=$(dpkg-query -S "$bin" 2>/dev/null || true)
+    fi
+    if [[ -z "$owner" ]]; then
+        rm -f -- "$bin"
+        _yellow "  删除 $bin"
+    else
+        _yellow "  保留系统包提供的 $bin ($owner)"
+    fi
+}
 # 主要二进制
 for bin in \
     /usr/local/bin/nerdctl \
@@ -202,7 +288,7 @@ for bin in \
     /usr/local/bin/buildkitd \
     /usr/bin/buildkitd \
     /usr/local/sbin/runc; do
-    [[ -f "$bin" ]] && rm -f "$bin" && _yellow "  删除 $bin"
+    remove_bundle_binary "$bin"
 done
 # CNI 插件
 if [[ -d /usr/local/libexec/cni ]]; then
@@ -210,9 +296,11 @@ if [[ -d /usr/local/libexec/cni ]]; then
     _yellow "  删除 /usr/local/libexec/cni"
 fi
 # containerd 配置目录
-if [[ -d /etc/containerd ]]; then
+if [[ -d /etc/containerd && "$CONTAINERD_SHARED" != true ]]; then
     rm -rf /etc/containerd
     _yellow "  删除 /etc/containerd"
+elif [[ -d /etc/containerd ]]; then
+    _yellow "  保留共享的 /etc/containerd"
 fi
 if [[ -d /etc/buildkit ]]; then
     rm -rf /etc/buildkit
@@ -264,12 +352,13 @@ if [[ -f /usr/local/bin/containerd_install_path ]]; then
         _yellow "  删除 $custom_path"
     fi
 fi
-for dir in \
-    /var/lib/containerd \
-    /var/lib/buildkit \
-    /var/lib/nerdctl \
-    /run/containerd \
-    /run/buildkit; do
+data_dirs=(/var/lib/buildkit /var/lib/nerdctl /run/buildkit)
+if [[ "$CONTAINERD_SHARED" != true ]]; then
+    data_dirs+=(/var/lib/containerd /run/containerd)
+else
+    _yellow "  保留共享的 /var/lib/containerd 与 /run/containerd"
+fi
+for dir in "${data_dirs[@]}"; do
     if [[ -d "$dir" ]]; then
         rm -rf "$dir"
         _yellow "  删除 $dir"
@@ -302,6 +391,7 @@ for f in \
     /usr/local/bin/containerd_loop_file \
     /usr/local/bin/containerd_mount_point \
     /usr/local/bin/containerd_storage_reboot \
+    /usr/local/bin/containerd_service_created \
     /usr/local/bin/check-dns.sh \
     /etc/profile.d/containerd-path.sh; do
     [[ -f "$f" ]] && rm -f "$f" && _yellow "  删除 $f"

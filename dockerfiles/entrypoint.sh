@@ -26,6 +26,18 @@ if [ -f "$sshd_cfg" ]; then
         sed -i 's/^#\?PermitRootLogin.*/PermitRootLogin yes/' "$sshd_cfg"
     grep -q "^PasswordAuthentication yes" "$sshd_cfg" || \
         sed -i 's/^#\?PasswordAuthentication.*/PasswordAuthentication yes/' "$sshd_cfg"
+    for file in "$sshd_cfg" "${config_dir}"*; do
+        [ -f "$file" ] || continue
+        sed -E -i \
+            -e '/^[[:space:]]*#/b' \
+            -e '/^[[:space:]]*AddressFamily[[:space:]]+any([[:space:]]|$)/b' \
+            -e 's/^[[:space:]]*AddressFamily[[:space:]]+.*/# &/' \
+            -e 's/^[[:space:]]*ListenAddress[[:space:]]+.*/# &/' \
+            "$file"
+    done
+    if ! grep -Eq '^[[:space:]]*AddressFamily[[:space:]]+any([[:space:]]|$)' "$sshd_cfg"; then
+        sed -i '1iAddressFamily any' "$sshd_cfg"
+    fi
 fi
 
 # 修复 cloud-init 密码禁用策略

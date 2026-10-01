@@ -57,6 +57,8 @@ jobs:
         run: |
           set -euo pipefail
           bash tests/test_ipv6_network.sh
+          bash tests/initialization_test.sh
+          bash tests/noninteractive_mode_test.sh
           python3 tests/test_image_archive.py
           bash tests/test_creation_rollback.sh
           bash tests/test_batch_creation_rollback.sh
