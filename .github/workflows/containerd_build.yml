@@ -1,13 +1,6 @@
 name: Build and Push containerd Images
-
-on:
-  schedule:
-      - cron: "0 17 * * *"
-  workflow_dispatch:
-
 env:
-  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: "true"
-
+  FORCE_JAVASCRIPT_ACTIONS_TO_NODE24: 'true'
 jobs:
   build:
     runs-on: ubuntu-latest
@@ -18,107 +11,104 @@ jobs:
     permissions:
       contents: write
       packages: write
-
     strategy:
       fail-fast: false
       matrix:
         include:
-          - system: ubuntu
-            dockerfile: Dockerfile_ubuntu
-            tag_prefix: ubuntu
-          - system: debian
-            dockerfile: Dockerfile_debian
-            tag_prefix: debian
-          - system: alpine
-            dockerfile: Dockerfile_alpine
-            tag_prefix: alpine
-          - system: almalinux
-            dockerfile: Dockerfile_almalinux
-            tag_prefix: almalinux
-          - system: rockylinux
-            dockerfile: Dockerfile_rockylinux
-            tag_prefix: rockylinux
-          - system: openeuler
-            dockerfile: Dockerfile_openeuler
-            tag_prefix: openeuler
-
+        - system: ubuntu
+          dockerfile: Dockerfile_ubuntu
+          tag_prefix: ubuntu
+        - system: debian
+          dockerfile: Dockerfile_debian
+          tag_prefix: debian
+        - system: alpine
+          dockerfile: Dockerfile_alpine
+          tag_prefix: alpine
+        - system: almalinux
+          dockerfile: Dockerfile_almalinux
+          tag_prefix: almalinux
+        - system: rockylinux
+          dockerfile: Dockerfile_rockylinux
+          tag_prefix: rockylinux
+        - system: openeuler
+          dockerfile: Dockerfile_openeuler
+          tag_prefix: openeuler
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Set up QEMU (multi-arch)
-        uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
-
-      - name: Set up Docker Buildx
-        uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
-
-      - name: Login to GitHub Container Registry
-        uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-
-      - name: Build and export amd64 tar
-        run: |
-          set -euo pipefail
-          docker buildx build \
-            --platform linux/amd64 \
-            --file dockerfiles/${{ matrix.dockerfile }} \
-            --tag spiritlhl/${{ matrix.tag_prefix }}:latest \
-            --output type=docker \
-            dockerfiles/
-          docker save spiritlhl/${{ matrix.tag_prefix }}:latest > /tmp/raw_${{ matrix.tag_prefix }}_amd64.tar
-          python3 scripts/validate_image_archive.py \
-            --archive /tmp/raw_${{ matrix.tag_prefix }}_amd64.tar \
-            --arch amd64
-          gzip < /tmp/raw_${{ matrix.tag_prefix }}_amd64.tar > spiritlhl_${{ matrix.tag_prefix }}_amd64.tar.gz
-          gzip -t spiritlhl_${{ matrix.tag_prefix }}_amd64.tar.gz
-          rm -f /tmp/raw_${{ matrix.tag_prefix }}_amd64.tar
-          echo "amd64 tar size: $(du -sh spiritlhl_${{ matrix.tag_prefix }}_amd64.tar.gz)"
-
-      - name: Build and export arm64 tar
-        run: |
-          set -euo pipefail
-          docker buildx build \
-            --platform linux/arm64 \
-            --file dockerfiles/${{ matrix.dockerfile }} \
-            --tag spiritlhl/${{ matrix.tag_prefix }}:latest \
-            --output type=docker \
-            dockerfiles/
-          docker save spiritlhl/${{ matrix.tag_prefix }}:latest > /tmp/raw_${{ matrix.tag_prefix }}_arm64.tar
-          python3 scripts/validate_image_archive.py \
-            --archive /tmp/raw_${{ matrix.tag_prefix }}_arm64.tar \
-            --arch arm64
-          gzip < /tmp/raw_${{ matrix.tag_prefix }}_arm64.tar > spiritlhl_${{ matrix.tag_prefix }}_arm64.tar.gz
-          gzip -t spiritlhl_${{ matrix.tag_prefix }}_arm64.tar.gz
-          rm -f /tmp/raw_${{ matrix.tag_prefix }}_arm64.tar
-          echo "arm64 tar size: $(du -sh spiritlhl_${{ matrix.tag_prefix }}_arm64.tar.gz)"
-
-      - name: Upload tars to GitHub Release
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release view "${{ matrix.tag_prefix }}" >/dev/null 2>&1 || \
-            gh release create "${{ matrix.tag_prefix }}" \
-              --title "${{ matrix.tag_prefix }}" \
-              --notes "containerd image for ${{ matrix.tag_prefix }} (amd64 + arm64)"
-          gh release upload "${{ matrix.tag_prefix }}" \
-            spiritlhl_${{ matrix.tag_prefix }}_amd64.tar.gz \
-            spiritlhl_${{ matrix.tag_prefix }}_arm64.tar.gz \
-            --clobber
-
-      - name: Push multi-arch image to GHCR
-        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
-        with:
-          context: dockerfiles/
-          file: dockerfiles/${{ matrix.dockerfile }}
-          platforms: linux/amd64,linux/arm64
-          push: true
-          tags: |
-            ghcr.io/${{ github.repository_owner }}/containerd:${{ matrix.tag_prefix }}
-            ghcr.io/${{ github.repository_owner }}/${{ matrix.tag_prefix }}:latest
-
+    - name: Load trusted network recovery helpers
+      shell: bash
+      run: |
+        set -euo pipefail
+        curl --fail --silent --show-error --location --connect-timeout 15 --max-time 90 --retry 3 --retry-max-time 180 --retry-connrefused "https://raw.githubusercontent.com/oneclickvirt/containerd/main/.github/scripts/ci_network.sh" -o "$RUNNER_TEMP/ci-network.sh"
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Set up QEMU (multi-arch)
+      uses: docker/setup-qemu-action@99012661954931238ded8c8b007157a8430204e1 # v4.4.0
+    - name: Set up Docker Buildx
+      uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+    - name: Login to GitHub Container Registry
+      uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+    - name: Build and export amd64 tar
+      run: |
+        set -euo pipefail
+        docker buildx build \
+          --platform linux/amd64 \
+          --file dockerfiles/${{ matrix.dockerfile }} \
+          --tag spiritlhl/${{ matrix.tag_prefix }}:latest \
+          --output type=docker \
+          dockerfiles/
+        docker save spiritlhl/${{ matrix.tag_prefix }}:latest > /tmp/raw_${{ matrix.tag_prefix }}_amd64.tar
+        python3 scripts/validate_image_archive.py \
+          --archive /tmp/raw_${{ matrix.tag_prefix }}_amd64.tar \
+          --arch amd64
+        gzip < /tmp/raw_${{ matrix.tag_prefix }}_amd64.tar > spiritlhl_${{ matrix.tag_prefix }}_amd64.tar.gz
+        gzip -t spiritlhl_${{ matrix.tag_prefix }}_amd64.tar.gz
+        rm -f /tmp/raw_${{ matrix.tag_prefix }}_amd64.tar
+        echo "amd64 tar size: $(du -sh spiritlhl_${{ matrix.tag_prefix }}_amd64.tar.gz)"
+    - name: Build and export arm64 tar
+      run: |
+        set -euo pipefail
+        docker buildx build \
+          --platform linux/arm64 \
+          --file dockerfiles/${{ matrix.dockerfile }} \
+          --tag spiritlhl/${{ matrix.tag_prefix }}:latest \
+          --output type=docker \
+          dockerfiles/
+        docker save spiritlhl/${{ matrix.tag_prefix }}:latest > /tmp/raw_${{ matrix.tag_prefix }}_arm64.tar
+        python3 scripts/validate_image_archive.py \
+          --archive /tmp/raw_${{ matrix.tag_prefix }}_arm64.tar \
+          --arch arm64
+        gzip < /tmp/raw_${{ matrix.tag_prefix }}_arm64.tar > spiritlhl_${{ matrix.tag_prefix }}_arm64.tar.gz
+        gzip -t spiritlhl_${{ matrix.tag_prefix }}_arm64.tar.gz
+        rm -f /tmp/raw_${{ matrix.tag_prefix }}_arm64.tar
+        echo "arm64 tar size: $(du -sh spiritlhl_${{ matrix.tag_prefix }}_arm64.tar.gz)"
+    - name: Upload tars to GitHub Release
+      env:
+        GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      run: |
+        source "$RUNNER_TEMP/ci-network.sh"
+        gh release view "${{ matrix.tag_prefix }}" >/dev/null 2>&1 || \
+          gh release create "${{ matrix.tag_prefix }}" \
+            --title "${{ matrix.tag_prefix }}" \
+            --notes "containerd image for ${{ matrix.tag_prefix }} (amd64 + arm64)"
+        gh release upload "${{ matrix.tag_prefix }}" \
+          spiritlhl_${{ matrix.tag_prefix }}_amd64.tar.gz \
+          spiritlhl_${{ matrix.tag_prefix }}_arm64.tar.gz \
+          --clobber
+      shell: bash
+    - name: Push multi-arch image to GHCR
+      uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+      with:
+        context: dockerfiles/
+        file: dockerfiles/${{ matrix.dockerfile }}
+        platforms: linux/amd64,linux/arm64
+        push: true
+        tags: |
+          ghcr.io/${{ github.repository_owner }}/containerd:${{ matrix.tag_prefix }}
+          ghcr.io/${{ github.repository_owner }}/${{ matrix.tag_prefix }}:latest
   script-smoke:
     runs-on: ubuntu-latest
     timeout-minutes: 30
@@ -127,29 +117,37 @@ jobs:
       cancel-in-progress: false
     permissions:
       contents: read
-
     steps:
-      - name: Checkout
-        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-
-      - name: Non-interactive script smoke tests
-        shell: bash
-        run: |
-          set -euo pipefail
-          images=(ubuntu:22.04 debian:12 alpine:3.20)
-          for image in "${images[@]}"; do
-            docker run --rm -v "$PWD:/repo:ro" -w /repo "$image" sh -c '
-              set -eu
-              if command -v apk >/dev/null 2>&1; then
-                apk add --no-cache bash curl coreutils python3 >/dev/null
-              else
-                export DEBIAN_FRONTEND=noninteractive
-                apt-get update >/dev/null
-                apt-get install -y --no-install-recommends bash curl ca-certificates python3 >/dev/null
-              fi
-              tmp_repo=$(mktemp -d)
-              cp -a /repo/. "$tmp_repo/"
-              cd "$tmp_repo"
-              bash tests/script_smoke.sh
-            '
-          done
+    - name: Load trusted network recovery helpers
+      shell: bash
+      run: |
+        set -euo pipefail
+        curl --fail --silent --show-error --location --connect-timeout 15 --max-time 90 --retry 3 --retry-max-time 180 --retry-connrefused "https://raw.githubusercontent.com/oneclickvirt/containerd/main/.github/scripts/ci_network.sh" -o "$RUNNER_TEMP/ci-network.sh"
+    - name: Checkout
+      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+    - name: Non-interactive script smoke tests
+      shell: bash
+      run: |
+        source "$RUNNER_TEMP/ci-network.sh"
+        set -euo pipefail
+        images=(ubuntu:22.04 debian:12 alpine:3.20)
+        for image in "${images[@]}"; do
+          docker run --rm -v "$PWD:/repo:ro" -w /repo "$image" sh -c '
+            set -eu
+            if command -v apk >/dev/null 2>&1; then
+              apk add --no-cache bash curl coreutils python3 >/dev/null
+            else
+              export DEBIAN_FRONTEND=noninteractive
+              apt-get update >/dev/null
+              apt-get install -y --no-install-recommends bash curl ca-certificates python3 >/dev/null
+            fi
+            tmp_repo=$(mktemp -d)
+            cp -a /repo/. "$tmp_repo/"
+            cd "$tmp_repo"
+            bash tests/script_smoke.sh
+          '
+        done
+'on':
+  schedule:
+  - cron: 0 17 * * *
+  workflow_dispatch: null
