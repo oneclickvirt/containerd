@@ -169,9 +169,17 @@ grep -Fq 'try_storage_drivers || return 1' <<<"$containerd_source" ||
 printf 'Containerd snapshotter refusal propagation check passed\n'
 
 load_function guard_existing_containerd_owner
+# Isolate host filesystem dependencies: hosted runners already contain Docker.
+containerd_installer_owned() { return 1; }
+docker_binary_installed() { return 1; }
 package_owns_path() { return 1; }
 systemctl() { :; }
 guard_existing_containerd_owner || fail 'clean dedicated nodes must remain installable'
+docker_binary_installed() { return 0; }
+if guard_existing_containerd_owner; then
+    fail 'Docker binary presence must refuse takeover even without a shared unit'
+fi
+docker_binary_installed() { return 1; }
 package_owns_path() { [[ "$1" == /usr/bin/containerd ]]; }
 if guard_existing_containerd_owner; then
     fail 'package-owned containerd must not be overwritten'
@@ -184,6 +192,8 @@ systemctl() {
 if guard_existing_containerd_owner; then
     fail 'Docker shared-containerd nodes must not be taken over'
 fi
+containerd_installer_owned() { return 0; }
+guard_existing_containerd_owner || fail 'an owned repeat installation must remain permitted'
 printf 'Containerd cross-runtime ownership guard passed\n'
 grep -Fq '"ca-certificates"' "$repo_root/scripts/ssh_bash.sh" ||
     fail 'Debian/RHEL guest bootstrap must install TLS root certificates'

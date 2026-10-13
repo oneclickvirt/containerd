@@ -64,16 +64,22 @@ package_owns_path() {
     fi
     return 1
 }
+containerd_installer_owned() {
+    [[ -f /usr/local/bin/containerd_arch ||
+       -f /usr/local/bin/containerd_service_created ]]
+}
+docker_binary_installed() {
+    [[ -x /usr/bin/dockerd || -x /usr/local/bin/dockerd ]]
+}
 guard_existing_containerd_owner() {
     # A repeat run of this installer is allowed.  A Docker/distribution-owned
     # daemon is not: replacing its config, service unit or data root would
     # silently take over another runtime and make a later uninstall destructive.
-    [[ -f /usr/local/bin/containerd_arch ||
-       -f /usr/local/bin/containerd_service_created ]] && return 0
+    containerd_installer_owned && return 0
     local docker_unit=""
     docker_unit=$(systemctl cat docker.service 2>/dev/null || true)
-    if [[ -x /usr/bin/dockerd || -x /usr/local/bin/dockerd ||
-          "$docker_unit" == *"/run/containerd/containerd.sock"* ]] ||
+    if docker_binary_installed ||
+       [[ "$docker_unit" == *"/run/containerd/containerd.sock"* ]] ||
        package_owns_path /usr/bin/containerd ||
        package_owns_path /usr/lib/systemd/system/containerd.service ||
        package_owns_path /lib/systemd/system/containerd.service; then
