@@ -1937,13 +1937,18 @@ configure_ndpresponder_boot_service() {
 [Unit]
 Description=Restore OneClickVirt Containerd NDP responder
 Requires=containerd.service
-After=containerd.service network-online.target
+After=containerd.service network-online.target apparmor.service
 Wants=network-online.target
+StartLimitIntervalSec=120
+StartLimitBurst=3
 
 [Service]
 Type=oneshot
 RemainAfterExit=yes
 TimeoutStartSec=60
+Restart=on-failure
+RestartSec=5
+ExecStartPre=/bin/sh -c 'if [ -r /sys/module/apparmor/parameters/enabled ] && grep -q Y /sys/module/apparmor/parameters/enabled; then /usr/local/bin/nerdctl apparmor load; fi'
 ExecStart=/bin/sh -c 'if [ "$(/usr/local/bin/nerdctl inspect -f "{{.State.Status}}" ndpresponder 2>/dev/null)" = running ]; then exit 0; fi; : > /usr/local/bin/containerd_ipv6_ndp_ready; exec /usr/local/bin/nerdctl start ndpresponder'
 ExecStartPost=/bin/sh -c 'i=0; while [ "$i" -lt 35 ]; do if [ "$(/usr/local/bin/nerdctl inspect -f "{{.State.Status}}" ndpresponder 2>/dev/null)" = running ] && [ -s /usr/local/bin/containerd_ipv6_ndp_ready ]; then exit 0; fi; i=$((i+1)); sleep 1; done; exit 1'
 
