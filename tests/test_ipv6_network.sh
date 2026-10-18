@@ -509,6 +509,11 @@ if ! grep -Fq 'arm64) arch_tag="aarch64"' "$installer" ||
     exit 1
 fi
 start_ndpresponder_source=$(extract_function start_ndpresponder)
+if ! grep -Fq 'configure_ndpresponder_boot_service' <<<"$start_ndpresponder_source" ||
+   ! grep -Fq 'systemctl enable oneclickvirt-containerd-ndp.service' "$installer"; then
+    printf 'Containerd NDP boot recovery is missing\n' >&2
+    exit 1
+fi
 if grep -Fq -- '--restart always' <<<"$start_ndpresponder_source"; then
     printf 'Containerd ndpresponder must not retain an unconditional restart policy\n' >&2
     exit 1

@@ -1931,6 +1931,29 @@ resolve_ndpresponder_image() {
     return 0
 }
 
+configure_ndpresponder_boot_service() {
+    [[ -d /run/systemd/system ]] || return 0
+    cat > /etc/systemd/system/oneclickvirt-containerd-ndp.service <<'NDPUNIT'
+[Unit]
+Description=Restore OneClickVirt Containerd NDP responder
+Requires=containerd.service
+After=containerd.service network-online.target
+Wants=network-online.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+TimeoutStartSec=60
+ExecStart=/bin/sh -c 'if [ "$(/usr/local/bin/nerdctl inspect -f "{{.State.Status}}" ndpresponder 2>/dev/null)" = running ]; then exit 0; fi; : > /usr/local/bin/containerd_ipv6_ndp_ready; exec /usr/local/bin/nerdctl start ndpresponder'
+ExecStartPost=/bin/sh -c 'i=0; while [ "$i" -lt 35 ]; do if [ "$(/usr/local/bin/nerdctl inspect -f "{{.State.Status}}" ndpresponder 2>/dev/null)" = running ] && [ -s /usr/local/bin/containerd_ipv6_ndp_ready ]; then exit 0; fi; i=$((i+1)); sleep 1; done; exit 1'
+
+[Install]
+WantedBy=multi-user.target
+NDPUNIT
+    systemctl daemon-reload || return 1
+    systemctl enable oneclickvirt-containerd-ndp.service || return 1
+}
+
 start_ndpresponder() {
     local network_mode ndp_required uplink state_dir
     state_dir="${CONTAINERD_IPV6_STATE_DIR:-/usr/local/bin}"
@@ -1978,7 +2001,7 @@ start_ndpresponder() {
     nerdctl rm -f ndpresponder 2>/dev/null || true
 
     if nerdctl run -d \
-        --restart always \
+        --restart on-failure:3 \
         --cpus 0.02 \
         --memory 64m \
         --cap-drop=ALL \
@@ -1995,6 +2018,7 @@ start_ndpresponder() {
             ndp_status=$(nerdctl inspect -f '{{.State.Status}}' ndpresponder 2>/dev/null || true)
             if [[ "$ndp_status" == "running" && -s "$ready_file" ]]; then
                 printf '%s\n' true > "${state_dir}/containerd_ipv6_ndp_ready_required"
+                configure_ndpresponder_boot_service || return 1
                 _green "NDP responder started, is reading CNI IPv6 leases, and is ready for neighbor discovery"
                 return 0
             fi

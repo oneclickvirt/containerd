@@ -102,6 +102,12 @@ if [[ "$confirm" != "yes" ]]; then
     exit 0
 fi
 
+if [[ -f /etc/systemd/system/oneclickvirt-containerd-ndp.service ]]; then
+    systemctl disable --now oneclickvirt-containerd-ndp.service 2>/dev/null || true
+    rm -f /etc/systemd/system/oneclickvirt-containerd-ndp.service
+    systemctl daemon-reload 2>/dev/null || true
+fi
+
 # ======== 1. 停止并删除所有容器（包括 ndpresponder） ========
 _blue "[1/10] 停止并删除所有容器..."
 if command -v nerdctl >/dev/null 2>&1; then
