@@ -36,6 +36,7 @@ jobs:
         bash tests/initialization_test.sh
         bash tests/noninteractive_mode_test.sh
         python3 tests/test_image_archive.py
+        python3 tests/test_static_ipv6.py
         bash tests/test_creation_rollback.sh
         bash tests/test_batch_creation_rollback.sh
   script-smoke:
@@ -86,14 +87,14 @@ jobs:
     paths:
     - '**/*.sh'
     - scripts/validate_image_archive.py
-    - tests/test_image_archive.py
+    - tests/*.py
     - .github/workflows/containerd_build.yml
     - .github/workflows/ipv6-regression.yml
   pull_request:
     paths:
     - '**/*.sh'
     - scripts/validate_image_archive.py
-    - tests/test_image_archive.py
+    - tests/*.py
     - .github/workflows/containerd_build.yml
     - .github/workflows/ipv6-regression.yml
   workflow_dispatch: null
