@@ -104,7 +104,7 @@ fi
 
 if [[ -f /etc/systemd/system/oneclickvirt-containerd-ndp.service ]]; then
     systemctl disable --now oneclickvirt-containerd-ndp.service 2>/dev/null || true
-    rm -f /etc/systemd/system/oneclickvirt-containerd-ndp.service
+    rm -f /etc/systemd/system/oneclickvirt-containerd-ndp.service /usr/local/sbin/oneclickvirt-containerd-ipv6-proxy
     systemctl daemon-reload 2>/dev/null || true
 fi
 

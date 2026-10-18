@@ -1931,8 +1931,51 @@ resolve_ndpresponder_image() {
     return 0
 }
 
+configure_containerd_ipv6_proxy_neighbors() {
+    local uplink="${1:-}" allocation_dir="${CONTAINERD_IPV6_ALLOCATION_DIR:-/var/lib/oneclickvirt/containerd-ipv6}" address
+    [[ -n "$uplink" ]] || return 1
+    command -v ip >/dev/null 2>&1 || return 1
+    [[ -d "$allocation_dir" ]] || return 0
+    shopt -s nullglob
+    local records=("$allocation_dir"/*.json)
+    shopt -u nullglob
+    for record in "${records[@]}"; do
+        address=$(python3 - "$record" <<'PYADDR'
+import json,sys
+try:
+    value=json.load(open(sys.argv[1]))['address']
+    print(value)
+except Exception:
+    pass
+PYADDR
+)
+        [[ -n "$address" ]] || continue
+        ip -6 neigh add proxy "$address" dev "$uplink" 2>/dev/null ||             ip -6 neigh replace proxy "$address" dev "$uplink" 2>/dev/null || return 1
+    done
+}
+
 configure_ndpresponder_boot_service() {
     [[ -d /run/systemd/system ]] || return 0
+    cat > /usr/local/sbin/oneclickvirt-containerd-ipv6-proxy <<'NDP_PROXY'
+#!/bin/sh
+set -eu
+uplink=$(tr -d '[:space:]' </usr/local/bin/containerd_ipv6_uplink 2>/dev/null || true)
+[ -n "$uplink" ] || exit 0
+allocation_dir="${CONTAINERD_IPV6_ALLOCATION_DIR:-/var/lib/oneclickvirt/containerd-ipv6}"
+[ -d "$allocation_dir" ] || exit 0
+for record in "$allocation_dir"/*.json; do
+  [ -f "$record" ] || continue
+  address=$(python3 - "$record" <<'PYADDR'
+import json,sys
+try: print(json.load(open(sys.argv[1]))['address'])
+except Exception: pass
+PYADDR
+)
+  [ -n "$address" ] || continue
+  /usr/sbin/ip -6 neigh add proxy "$address" dev "$uplink" 2>/dev/null || /usr/sbin/ip -6 neigh replace proxy "$address" dev "$uplink" 2>/dev/null || exit 1
+done
+NDP_PROXY
+    chmod 700 /usr/local/sbin/oneclickvirt-containerd-ipv6-proxy
     cat > /etc/systemd/system/oneclickvirt-containerd-ndp.service <<'NDPUNIT'
 [Unit]
 Description=Restore OneClickVirt Containerd NDP responder
@@ -1948,6 +1991,7 @@ RemainAfterExit=yes
 TimeoutStartSec=60
 Restart=on-failure
 RestartSec=5
+ExecStartPre=/usr/local/sbin/oneclickvirt-containerd-ipv6-proxy
 ExecStartPre=/bin/sh -c 'if [ -r /sys/module/apparmor/parameters/enabled ] && grep -q Y /sys/module/apparmor/parameters/enabled; then /usr/local/bin/nerdctl apparmor load; fi'
 ExecStart=/bin/sh -c 'if [ "$(/usr/local/bin/nerdctl inspect -f "{{.State.Status}}" ndpresponder 2>/dev/null)" = running ]; then exit 0; fi; : > /usr/local/bin/containerd_ipv6_ndp_ready; exec /usr/local/bin/nerdctl start ndpresponder'
 ExecStartPost=/bin/sh -c 'i=0; while [ "$i" -lt 35 ]; do if [ "$(/usr/local/bin/nerdctl inspect -f "{{.State.Status}}" ndpresponder 2>/dev/null)" = running ] && [ -s /usr/local/bin/containerd_ipv6_ndp_ready ]; then exit 0; fi; i=$((i+1)); sleep 1; done; exit 1'
