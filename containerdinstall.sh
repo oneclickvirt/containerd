@@ -1978,7 +1978,7 @@ start_ndpresponder() {
     nerdctl rm -f ndpresponder 2>/dev/null || true
 
     if nerdctl run -d \
-        --restart on-failure:3 \
+        --restart always \
         --cpus 0.02 \
         --memory 64m \
         --cap-drop=ALL \
