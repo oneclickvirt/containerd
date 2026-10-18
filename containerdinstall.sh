@@ -1966,6 +1966,11 @@ start_ndpresponder() {
         ndp_required=$(tr -d '[:space:]' <"${state_dir}/containerd_ipv6_ndp_required" 2>/dev/null || true)
     fi
     if [[ "$network_mode" == "nat" || "$ndp_required" == "false" ]]; then
+        # A rerun may switch a managed public subnet to NAT66 or a tunnel.
+        # Do not resurrect an obsolete Ethernet responder on the next boot.
+        if [[ -f /etc/systemd/system/oneclickvirt-containerd-ndp.service ]]; then
+            systemctl disable --now oneclickvirt-containerd-ndp.service 2>/dev/null || true
+        fi
         if [[ "$network_mode" != "nat" ]]; then
             _green "Containerd routed IPv6 uses a non-Ethernet uplink; NDP responder is not required"
             return 0
