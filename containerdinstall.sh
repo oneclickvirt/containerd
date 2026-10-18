@@ -1963,6 +1963,11 @@ uplink=$(tr -d '[:space:]' </usr/local/bin/containerd_ipv6_uplink 2>/dev/null ||
 [ -n "$uplink" ] || exit 0
 allocation_dir="${CONTAINERD_IPV6_ALLOCATION_DIR:-/var/lib/oneclickvirt/containerd-ipv6}"
 [ -d "$allocation_dir" ] || exit 0
+add_proxy() {
+  address="$1"
+  [ -n "$address" ] || return 0
+  /usr/sbin/ip -6 neigh add proxy "$address" dev "$uplink" 2>/dev/null || /usr/sbin/ip -6 neigh replace proxy "$address" dev "$uplink" 2>/dev/null || return 1
+}
 for record in "$allocation_dir"/*.json; do
   [ -f "$record" ] || continue
   address=$(python3 - "$record" <<'PYADDR'
@@ -1971,9 +1976,14 @@ try: print(json.load(open(sys.argv[1]))['address'])
 except Exception: pass
 PYADDR
 )
-  [ -n "$address" ] || continue
-  /usr/sbin/ip -6 neigh add proxy "$address" dev "$uplink" 2>/dev/null || /usr/sbin/ip -6 neigh replace proxy "$address" dev "$uplink" 2>/dev/null || exit 1
+  add_proxy "$address"
 done
+if command -v /usr/local/bin/nerdctl >/dev/null 2>&1; then
+  for name in $(/usr/local/bin/nerdctl ps -a --format '{{.Names}}' 2>/dev/null); do
+    address=$(/usr/local/bin/nerdctl inspect "$name" --format '{{index .Config.Labels "nerdctl/ip6"}}' 2>/dev/null || true)
+    add_proxy "$address"
+  done
+fi
 NDP_PROXY
     chmod 700 /usr/local/sbin/oneclickvirt-containerd-ipv6-proxy
     cat > /etc/systemd/system/oneclickvirt-containerd-ndp.service <<'NDPUNIT'
