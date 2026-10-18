@@ -695,6 +695,82 @@ check_port_conflicts() {
     fi
 }
 
+# Keep an allocation after CNI releases its lease on stop. Hold the lock until
+# creation finishes, including the second name check, to serialize script users.
+reserve_containerd_ipv6() {
+    local state_dir="${CONTAINERD_IPV6_STATE_DIR:-/usr/local/bin}"
+    local allocation_dir="${CONTAINERD_IPV6_ALLOCATION_DIR:-/var/lib/oneclickvirt/containerd-ipv6}"
+    command -v python3 >/dev/null 2>&1 && command -v flock >/dev/null 2>&1 || {
+        _red "Persistent IPv6 allocation requires python3 and flock"
+        return 1
+    }
+    local run_help
+    run_help=$(nerdctl run --help 2>/dev/null) || return 1
+    grep -Eq -- '(^|[[:space:]])--ip6([=[:space:]]|$)' <<<"$run_help" || {
+        _red "This nerdctl does not support --ip6; refusing an unstable IPv6 allocation"
+        return 1
+    }
+    mkdir -p -- "$allocation_dir" || return 1
+    chmod 700 "$allocation_dir" || return 1
+    exec 9>"$allocation_dir/.lock"
+    flock -w 60 9 || return 1
+    check_container_name_available
+    python3 - "$state_dir/containerd_ipv6_subnet" "$allocation_dir" "$name" "${CONTAINERD_CNI_LEASE_DIR:-/var/lib/cni/networks/containerd-ipv6}" <<'PYSTATIC'
+import hashlib
+import ipaddress
+import json
+import os
+from pathlib import Path
+import sys
+
+subnet_file, allocation_dir, name, lease_dir = sys.argv[1:]
+network = ipaddress.IPv6Network(Path(subnet_file).read_text().strip(), strict=True)
+root = Path(allocation_dir)
+record = root / (name + '.json')
+reserved = set()
+for p in root.glob('*.json'):
+    data = json.loads(p.read_text())
+    address = ipaddress.IPv6Address(data['address'])
+    if p != record:
+        reserved.add(address)
+# Running allocations made outside this script must also be excluded.
+leases = Path(lease_dir)
+if leases.exists():
+    for p in leases.iterdir():
+        try:
+            reserved.add(ipaddress.IPv6Address(p.name))
+        except ValueError:
+            pass
+if record.exists():
+    data = json.loads(record.read_text())
+    address = ipaddress.IPv6Address(data['address'])
+    if data['subnet'] == str(network) and address in network and address not in reserved:
+        print(address)
+        sys.exit(0)
+# Skip the subnet address and the CNI gateway (first host). A bounded search
+# also handles small/exhausted subnets without traversing an IPv6 address space.
+size = network.num_addresses - 2
+if size <= 0:
+    sys.exit('IPv6 subnet has no usable addresses beyond its gateway')
+seed = int.from_bytes(hashlib.sha256((str(network) + ':' + name).encode()).digest(), 'big')
+for attempt in range(min(size, 1024)):
+    address = network.network_address + 2 + (seed + attempt) % size
+    if address in reserved:
+        continue
+    temp = record.with_suffix('.tmp')
+    fd = os.open(temp, os.O_CREAT | os.O_TRUNC | os.O_WRONLY, 0o600)
+    with os.fdopen(fd, 'w') as f:
+        json.dump({'subnet': str(network), 'address': str(address)}, f)
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(temp, record)
+    print(address)
+    break
+else:
+    sys.exit('No unreserved IPv6 address found within allocation budget')
+PYSTATIC
+}
+
 # ======== 主逻辑 ========
 container_created=false
 build_succeeded=false
@@ -726,7 +802,19 @@ main() {
     local net_args=(--network containerd-net)
     local ipv6_env_args=()
     if [[ "${independent_ipv6,,}" == "y" ]] && [[ "$IPV6_ENABLED" == "true" ]]; then
-        net_args=(--network containerd-ipv6)
+        local static_ipv6
+        # Do not use command substitution for the locking function: it would
+        # release FD 9 in a subshell before nerdctl creates the container.
+        local allocation_output
+        allocation_output=$(mktemp) || return 1
+        if ! reserve_containerd_ipv6 >"$allocation_output"; then
+            cat "$allocation_output" >&2
+            rm -f -- "$allocation_output"
+            return 1
+        fi
+        static_ipv6=$(tail -n 1 "$allocation_output")
+        rm -f -- "$allocation_output"
+        net_args=(--network containerd-ipv6 --ip6 "$static_ipv6")
         ipv6_env_args=(-e IPV6_ENABLED=true)
     fi
 

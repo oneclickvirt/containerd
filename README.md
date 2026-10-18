@@ -204,3 +204,11 @@ bash scripts/containerd_manage.sh version-check debian
 ## Stargazers over time
 
 [![Stargazers over time](https://starchart.cc/oneclickvirt/containerd.svg)](https://starchart.cc/oneclickvirt/containerd)
+
+### 独立 IPv6 的地址持久化
+
+新建的独立 IPv6 容器通过 nerdctl `--ip6` 固定地址，停启和宿主重启后复用该地址。
+分配记录保存在 `/var/lib/oneclickvirt/containerd-ipv6/`，仅 root 可访问；创建使用文件锁，避让已有记录及正在使用的 CNI 租约。
+删除容器后保留记录，以便同名重建复用地址；请勿在仍有对应容器时清理记录。
+旧容器不自动改网，需在备份后重建以应用固定地址。自定义 nerdctl/CNI 网络的静态地址应统一规划，避免与本脚本的地址池重叠。
+如果当前 nerdctl 不支持 `--ip6`、分配记录损坏或地址池耗尽，创建会明确失败，不会宣称已获得持久 IPv6。

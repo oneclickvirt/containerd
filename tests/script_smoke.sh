@@ -15,6 +15,7 @@ bash -n scripts/containerd_manage.sh
 bash -n scripts/ssh_bash.sh
 sh -n scripts/ssh_sh.sh
 python3 tests/test_image_archive.py
+python3 tests/test_static_ipv6.py
 bash tests/test_ipv6_network.sh
 bash tests/test_creation_rollback.sh
 bash tests/test_batch_creation_rollback.sh
