@@ -669,6 +669,11 @@ fi
     exit 1
 }
 
+# The boot unit is installed/verified in the real physical-host cycle.
+# This fixture validates responder readiness without changing host systemd.
+# shellcheck disable=SC2329
+configure_ndpresponder_boot_service() { :; }
+
 # A process in the running state can still be probing the uplink. New
 # installations must wait for ndpresponder to confirm that it can answer NDP.
 # shellcheck disable=SC2329 # Invoked by the dynamically sourced responder starter.
