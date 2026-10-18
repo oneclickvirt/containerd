@@ -713,7 +713,19 @@ reserve_containerd_ipv6() {
     mkdir -p -- "$allocation_dir" || return 1
     chmod 700 "$allocation_dir" || return 1
     exec 9>"$allocation_dir/.lock"
-    flock -w 60 9 || return 1
+    # BusyBox flock has no -w; both BusyBox and util-linux support -n.
+    local lock_attempt locked=false
+    for ((lock_attempt = 0; lock_attempt < 60; lock_attempt++)); do
+        if flock -n 9; then
+            locked=true
+            break
+        fi
+        sleep 1
+    done
+    if [[ "$locked" != true ]]; then
+        _red "Timed out waiting for the IPv6 allocation lock" >&2
+        return 1
+    fi
     check_container_name_available
     python3 - "$state_dir/containerd_ipv6_subnet" "$allocation_dir" "$name" "${CONTAINERD_CNI_LEASE_DIR:-/var/lib/cni/networks/containerd-ipv6}" <<'PYSTATIC'
 import hashlib
