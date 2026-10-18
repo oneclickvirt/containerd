@@ -697,6 +697,50 @@ check_port_conflicts() {
 
 # Keep an allocation after CNI releases its lease on stop. Hold the lock until
 # creation finishes, including the second name check, to serialize script users.
+enable_containerd_static_ipv6() {
+    python3 - "${CONTAINERD_CNI_IPV6_CONFIG:-/etc/cni/net.d/11-containerd-ipv6.conflist}" "${CONTAINERD_IPV6_STATE_DIR:-/usr/local/bin}/containerd_ipv6_subnet" <<'PYCAPS'
+import fcntl
+import ipaddress
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+import tempfile
+
+path, state = map(Path, sys.argv[1:])
+if path.is_symlink():
+    sys.exit('Refusing to change a symlinked CNI configuration')
+with path.with_suffix(path.suffix + '.ocv.lock').open('a') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    config = json.loads(path.read_text())
+    subnet = ipaddress.IPv6Network(state.read_text().strip(), strict=True)
+    bridges = [p for p in config.get('plugins', []) if p.get('type') == 'bridge' and p.get('bridge') == 'ctn-br1' and p.get('ipam', {}).get('type') == 'host-local']
+    if config.get('name') != 'containerd-ipv6' or len(bridges) != 1:
+        sys.exit('CNI configuration is not the managed containerd IPv6 bridge')
+    bridge = bridges[0]
+    ranges = bridge['ipam'].get('ranges', [])
+    if not any(ipaddress.ip_network(r['subnet']) == subnet for group in ranges for r in group):
+        sys.exit('CNI subnet differs from recorded containerd IPv6 subnet')
+    capabilities = bridge.setdefault('capabilities', {})
+    if capabilities.get('ips') is not True:
+        capabilities['ips'] = True
+        mode = stat.S_IMODE(path.stat().st_mode)
+        fd, temp = tempfile.mkstemp(prefix=path.name + '.', dir=path.parent)
+        try:
+            with os.fdopen(fd, 'w') as f:
+                os.fchmod(f.fileno(), mode)
+                json.dump(config, f, indent=2)
+                f.write('\n')
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp, path)
+        finally:
+            if os.path.exists(temp):
+                os.unlink(temp)
+PYCAPS
+}
+
 reserve_containerd_ipv6() {
     local state_dir="${CONTAINERD_IPV6_STATE_DIR:-/usr/local/bin}"
     local allocation_dir="${CONTAINERD_IPV6_ALLOCATION_DIR:-/var/lib/oneclickvirt/containerd-ipv6}"
@@ -727,6 +771,7 @@ reserve_containerd_ipv6() {
         return 1
     fi
     check_container_name_available
+    enable_containerd_static_ipv6 || return 1
     python3 - "$state_dir/containerd_ipv6_subnet" "$allocation_dir" "$name" "${CONTAINERD_CNI_LEASE_DIR:-/var/lib/cni/networks/containerd-ipv6}" <<'PYSTATIC'
 import hashlib
 import ipaddress

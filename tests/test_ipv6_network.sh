@@ -27,6 +27,8 @@ extract_function() {
     ' "$installer"
 }
 
+eval "$(extract_function enable_containerd_static_ipv6)"
+
 # shellcheck disable=SC1090 # The test intentionally loads one installer function.
 eval "$(extract_function derive_containerd_ipv6_subnet)"
 # shellcheck disable=SC1090 # The test intentionally loads the host overlap helper.
@@ -340,7 +342,8 @@ if containerd_ipv6_ula_state_matches_cni managed "$ula_candidate" "$ula_candidat
 fi
 cat > "$tmpdir/known-cni.conflist" <<EOF
 {
-  "plugins": [{"ipam": {"ranges": [[{"subnet": "172.21.0.0/16"}], [{"subnet": "${ula_candidate}"}]]}}]
+  "name": "containerd-ipv6",
+  "plugins": [{"type": "bridge", "bridge": "ctn-br1", "capabilities": {"ips": true}, "ipam": {"type": "host-local", "ranges": [[{"subnet": "172.21.0.0/16"}], [{"subnet": "${ula_candidate}"}]]}}]
 }
 EOF
 if [[ "$(containerd_cni_ipv6_subnet "$tmpdir/known-cni.conflist")" != "$ula_candidate" ]]; then
@@ -369,7 +372,8 @@ export CONTAINERD_CNI_IPV6_CONFIG="$tmpdir/managed-cni.conflist"
 export CONTAINERD_IPV6_STATE_DIR="$tmpdir/state"
 cat > "$CONTAINERD_CNI_IPV6_CONFIG" <<EOF
 {
-  "plugins": [{"ipam": {"ranges": [[{"subnet": "172.21.0.0/16"}], [{"subnet": "${ula_candidate}", "gateway": "${ula_gateway}"}]]}}]
+  "name": "containerd-ipv6",
+  "plugins": [{"type": "bridge", "bridge": "ctn-br1", "capabilities": {"ips": true}, "ipam": {"type": "host-local", "ranges": [[{"subnet": "172.21.0.0/16"}], [{"subnet": "${ula_candidate}", "gateway": "${ula_gateway}"}]]}}]
 }
 EOF
 printf 'nat\n' > "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_network_mode"
@@ -402,7 +406,8 @@ fi
 managed_public_subnet='2a14:6781:beef:200::/64'
 cat > "$CONTAINERD_CNI_IPV6_CONFIG" <<EOF
 {
-  "plugins": [{"ipam": {"ranges": [[{"subnet": "172.21.0.0/16"}], [{"subnet": "${managed_public_subnet}"}]]}}]
+  "name": "containerd-ipv6",
+  "plugins": [{"type": "bridge", "bridge": "ctn-br1", "capabilities": {"ips": true}, "ipam": {"type": "host-local", "ranges": [[{"subnet": "172.21.0.0/16"}], [{"subnet": "${managed_public_subnet}"}]]}}]
 }
 EOF
 printf 'managed\n' > "$CONTAINERD_IPV6_STATE_DIR/containerd_ipv6_network_mode"

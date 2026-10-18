@@ -56,8 +56,8 @@ class AllocationTest(unittest.TestCase):
 
     @unittest.skipUnless(shutil.which('flock'), 'requires Linux flock')
     def test_lock_covers_creation_and_help_capability(self):
-        function = SOURCE.split('reserve_containerd_ipv6() {', 1)[1].split('\n# ======== 主逻辑', 1)[0]
-        function = 'reserve_containerd_ipv6() {' + function
+        function = SOURCE.split('enable_containerd_static_ipv6() {', 1)[1].split('\n# ======== 主逻辑', 1)[0]
+        function = 'enable_containerd_static_ipv6() {' + function
         script = """set -eu
 _red() { echo "$*" >&2; }
 check_container_name_available() { :; }
@@ -71,11 +71,14 @@ echo "end:$name" >>"$CONTAINERD_IPV6_ALLOCATION_DIR/trace"
 """
         # The real state file name used by the shell function.
         (self.root / 'containerd_ipv6_subnet').write_text('2001:db8::/120')
-        env = dict(os.environ, CONTAINERD_IPV6_STATE_DIR=str(self.root), CONTAINERD_IPV6_ALLOCATION_DIR=str(self.records), CONTAINERD_CNI_LEASE_DIR=str(self.leases))
+        config = self.root / 'cni.json'
+        config.write_text(json.dumps({'name': 'containerd-ipv6', 'plugins': [{'type': 'bridge', 'bridge': 'ctn-br1', 'ipam': {'type': 'host-local', 'ranges': [[{'subnet': '2001:db8::/120'}]]}}]}))
+        env = dict(os.environ, CONTAINERD_CNI_IPV6_CONFIG=str(config), CONTAINERD_IPV6_STATE_DIR=str(self.root), CONTAINERD_IPV6_ALLOCATION_DIR=str(self.records), CONTAINERD_CNI_LEASE_DIR=str(self.leases))
         workers = [subprocess.Popen(['bash', '-c', script, 'audit', 'ct' + str(i)], env=env, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True) for i in range(4)]
         for worker in workers:
             out, err = worker.communicate(timeout=20)
             self.assertEqual(worker.returncode, 0, out + err)
+        self.assertTrue(json.loads(config.read_text())['plugins'][0]['capabilities']['ips'])
         lines = (self.records / 'trace').read_text().splitlines()
         for i in range(0, len(lines), 2):
             self.assertEqual(lines[i].replace('begin:', 'end:'), lines[i + 1])
@@ -84,6 +87,23 @@ echo "end:$name" >>"$CONTAINERD_IPV6_ALLOCATION_DIR/trace"
         result = subprocess.run(['bash', '-c', script, 'audit', 'old-cli'], env=dict(env, MOCK_HELP='--ip string'), capture_output=True, text=True)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn('does not support --ip6', result.stderr)
+
+    def test_capability_upgrade_preserves_network(self):
+        program = SOURCE.split("<<'PYCAPS'\n", 1)[1].split('\nPYCAPS', 1)[0]
+        config = self.root / 'network.json'
+        value = {'name': 'containerd-ipv6', 'plugins': [{'type': 'bridge', 'bridge': 'ctn-br1', 'custom': 'keep', 'capabilities': {'other': True}, 'ipam': {'type': 'host-local', 'ranges': [[{'subnet': '2001:db8::/125'}]]}}]}
+        config.write_text(json.dumps(value))
+        config.chmod(0o640)
+        result = subprocess.run([sys.executable, '-', str(config), str(self.state)], input=program, capture_output=True, text=True)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        value['plugins'][0]['capabilities']['ips'] = True
+        self.assertEqual(json.loads(config.read_text()), value)
+        self.assertEqual(config.stat().st_mode & 0o777, 0o640)
+        before = config.read_bytes()
+        self.state.write_text('2001:db8:1::/125')
+        result = subprocess.run([sys.executable, '-', str(config), str(self.state)], input=program, capture_output=True, text=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(config.read_bytes(), before)
 
     def test_too_small(self):
         self.state.write_text('2001:db8::/127')

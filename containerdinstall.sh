@@ -1524,6 +1524,50 @@ containerd_ipv6_state_matches_cni() {
     esac
 }
 
+enable_containerd_static_ipv6() {
+    python3 - "${CONTAINERD_CNI_IPV6_CONFIG:-/etc/cni/net.d/11-containerd-ipv6.conflist}" "${CONTAINERD_IPV6_STATE_DIR:-/usr/local/bin}/containerd_ipv6_subnet" <<'PYCAPS'
+import fcntl
+import ipaddress
+import json
+import os
+from pathlib import Path
+import stat
+import sys
+import tempfile
+
+path, state = map(Path, sys.argv[1:])
+if path.is_symlink():
+    sys.exit('Refusing to change a symlinked CNI configuration')
+with path.with_suffix(path.suffix + '.ocv.lock').open('a') as lock:
+    fcntl.flock(lock, fcntl.LOCK_EX)
+    config = json.loads(path.read_text())
+    subnet = ipaddress.IPv6Network(state.read_text().strip(), strict=True)
+    bridges = [p for p in config.get('plugins', []) if p.get('type') == 'bridge' and p.get('bridge') == 'ctn-br1' and p.get('ipam', {}).get('type') == 'host-local']
+    if config.get('name') != 'containerd-ipv6' or len(bridges) != 1:
+        sys.exit('CNI configuration is not the managed containerd IPv6 bridge')
+    bridge = bridges[0]
+    ranges = bridge['ipam'].get('ranges', [])
+    if not any(ipaddress.ip_network(r['subnet']) == subnet for group in ranges for r in group):
+        sys.exit('CNI subnet differs from recorded containerd IPv6 subnet')
+    capabilities = bridge.setdefault('capabilities', {})
+    if capabilities.get('ips') is not True:
+        capabilities['ips'] = True
+        mode = stat.S_IMODE(path.stat().st_mode)
+        fd, temp = tempfile.mkstemp(prefix=path.name + '.', dir=path.parent)
+        try:
+            with os.fdopen(fd, 'w') as f:
+                os.fchmod(f.fileno(), mode)
+                json.dump(config, f, indent=2)
+                f.write('\n')
+                f.flush()
+                os.fsync(f.fileno())
+            os.replace(temp, path)
+        finally:
+            if os.path.exists(temp):
+                os.unlink(temp)
+PYCAPS
+}
+
 create_containerd_ula_ipv6_network() {
     local public_parent="$1" subnet gateway index existing_subnet recorded_mode recorded_subnet
     local cni_config="${CONTAINERD_CNI_IPV6_CONFIG:-/etc/cni/net.d/11-containerd-ipv6.conflist}"
@@ -1541,6 +1585,7 @@ create_containerd_ula_ipv6_network() {
         [[ -n "$gateway" ]] || return 1
         printf '%s\n' "$public_parent" > "${state_dir}/containerd_ipv6_parent"
         printf '%s\n' "$gateway" > "${state_dir}/containerd_ipv6_gateway"
+        enable_containerd_static_ipv6 || return 1
         _green "Reusing installer-managed Containerd ULA IPv6 network: ${existing_subnet}"
         _green "复用安装器托管的 Containerd ULA IPv6 网络：${existing_subnet}"
         return 0
@@ -1559,6 +1604,7 @@ create_containerd_ula_ipv6_network() {
     {
       "type": "bridge",
       "bridge": "ctn-br1",
+      "capabilities": {"ips": true},
       "isGateway": true,
       "ipMasq": false,
       "promiscMode": true,
@@ -1687,6 +1733,7 @@ create_ipv6_network() {
         recorded_mode=$(tr -d '[:space:]' <"${state_dir}/containerd_ipv6_network_mode" 2>/dev/null || true)
         recorded_subnet=$(tr -d '[:space:]' <"${state_dir}/containerd_ipv6_subnet" 2>/dev/null || true)
         if containerd_ipv6_state_matches_cni "$recorded_mode" "$recorded_subnet" "$existing_subnet"; then
+            enable_containerd_static_ipv6 || return 1
             _green "Reusing installer-managed Containerd IPv6 CNI network: ${existing_subnet} (${recorded_mode})"
             _green "复用安装器托管的 Containerd IPv6 CNI 网络：${existing_subnet}（${recorded_mode}）"
             return 0
@@ -1743,6 +1790,7 @@ create_ipv6_network() {
     {
       "type": "bridge",
       "bridge": "ctn-br1",
+      "capabilities": {"ips": true},
       "isGateway": true,
       "ipMasq": false,
       "promiscMode": true,
