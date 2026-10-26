@@ -1,0 +1,36 @@
+{
+  "repository": "oneclickvirt/containerd",
+  "branch": "main",
+  "skill_name": "oneclickvirt-containerd",
+  "purpose": "Operate and troubleshoot containerd instances deployed with the OneClickVirt scripts.",
+  "notes": [
+    "Read the platform precheck and installation pages before changing a host.",
+    "Use the existing host runtime and its credentials. Instance IDs and names remain the native runtime identifiers.",
+    "MCP starts read-only. Set ONECLICKVIRT_MCP_ALLOW_WRITE=1 on the intended host to expose start, graceful stop and restart; deletion, reinstall and arbitrary shell commands are not exposed.",
+    "Use nerdctl with its existing namespace/configuration. Docker socket commands are not interchangeable."
+  ],
+  "guide": "https://www.spiritlhl.net/guide/agent_integrations.html",
+  "releases": false,
+  "runtime": "containerd",
+  "binary": "nerdctl",
+  "platform_guide": "https://www.spiritlhl.net/guide/containerd/containerd_precheck.html",
+  "mcp": true,
+  "source_files": [
+    "containerdinstall.sh",
+    "containerduninstall.sh",
+    "dockerfiles/entrypoint.sh",
+    "dockerfiles/entrypoint_alpine.sh",
+    "scripts/containerd_manage.sh",
+    "scripts/create_containerd.sh",
+    "scripts/onecontainerd.sh",
+    "scripts/ssh_bash.sh",
+    "scripts/ssh_sh.sh"
+  ],
+  "purpose_zh": "通过 nerdctl 管理和排查 OneClickVirt containerd 容器。",
+  "notes_zh": [
+    "变更宿主机前，先阅读平台准备和安装页。",
+    "使用本机已有运行环境及凭据；实例名称和 ID 保持原运行环境的标识。",
+    "MCP 默认只读。在目标主机设置 ONECLICKVIRT_MCP_ALLOW_WRITE=1 后才提供启动、正常关机和重启；不提供删除、重装或任意 Shell 执行。",
+    "使用 nerdctl 的现有命名空间及配置，不直接照搬 Docker socket 命令。"
+  ]
+}
