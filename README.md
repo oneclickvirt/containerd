@@ -31,4 +31,4 @@
 
 ## Stargazers over time
 
-[![Stargazers over time](https://starchart.cc/oneclickvirt/containerd.svg)](https://starchart.cc/oneclickvirt/containerd)
+[![Stargazers over time](https://api.star-history.com/chart?repos=oneclickvirt%2Fcontainerd&type=date)](https://starchart.cc/oneclickvirt/containerd)
